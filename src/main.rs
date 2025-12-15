@@ -1,5 +1,8 @@
 use lambda_http::{run, service_fn, tracing, Error};
 mod http_handler;
+mod dynamodb;
+mod s3;
+
 use http_handler::function_handler;
 
 #[tokio::main]
