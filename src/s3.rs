@@ -1,9 +1,6 @@
-use aws_sdk_s3::{
-    presigning::PresigningConfig,
-    types::ObjectIdentifier,
-    Client,
-};
 use aws_config::BehaviorVersion;
+use aws_sdk_s3::{presigning::PresigningConfig, Client};
+use aws_sdk_s3::types::StorageClass;
 use std::time::Duration;
 
 async fn s3_client() -> Client {
@@ -61,6 +58,7 @@ pub async fn presign_upload(
         .bucket(bucket)
         .key(key)
         .content_type(content_type)
+        .storage_class(StorageClass::GlacierIr)
         .presigned(PresigningConfig::expires_in(Duration::from_secs(900))?)
         .await?;
 
