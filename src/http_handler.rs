@@ -208,12 +208,12 @@ pub async fn function_handler(req: Request) -> Result<Response<Body>, Error> {
 
         let key = if let (Some(part_val), Some(idx_val)) = (&part, &idx) {
             if !part_val.is_empty() && !idx_val.is_empty() {
-                format!("{base_path}upload/{}/{}/{}", part_val, idx_val, filename)
+                format!("{base_path}{}/{}/{}", part_val, idx_val, filename)
             } else {
-                format!("{base_path}upload/{}", filename)
+                format!("{base_path}{}", filename)
             }
         } else {
-            format!("{base_path}upload/{}", filename)
+            format!("{base_path}{}", filename)
         };
 
         return match presign_download(&bucket, key).await {
@@ -236,12 +236,12 @@ pub async fn function_handler(req: Request) -> Result<Response<Body>, Error> {
 
         let key = if let (Some(part_val), Some(idx_val)) = (&part, &idx) {
             if !part_val.is_empty() && !idx_val.is_empty() {
-                format!("{base_path}upload/{}/{}/{}", part_val, idx_val, filename)
+                format!("{base_path}{}/{}/{}", part_val, idx_val, filename)
             } else {
-                format!("{base_path}upload/{}", filename)
+                format!("{base_path}{}", filename)
             }
         } else {
-            format!("{base_path}upload/{}", filename)
+            format!("{base_path}{}", filename)
         };
 
         return match presign_delete(&bucket, key).await {
