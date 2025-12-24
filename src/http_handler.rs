@@ -85,7 +85,7 @@ pub async fn function_handler(req: Request) -> Result<Response<Body>, Error> {
 
         return match get_item_value(part, idx).await {
             Ok(Some(value)) => text_response(200, value),
-            Ok(None) => text_response(200, "Value not found".to_string()),
+            Ok(None) => text_response(200, "".to_string()),
             Err(e) => {
                 tracing::error!("dynamodb get error: {:?}", e);
                 text_response(500, "dynamodb error".to_string())
