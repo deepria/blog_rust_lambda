@@ -2,7 +2,11 @@ use aws_config::BehaviorVersion;
 use aws_sdk_dynamodb::{types::AttributeValue, Client};
 use std::collections::HashMap;
 
-const TABLE_NAME: &str = "blog_deepria_master";
+
+fn get_table_name() -> String {
+    std::env::var("DYNAMODB_TABLE").unwrap_or_else(|_| "blog_deepria_master".to_string())
+}
+
 
 pub async fn dynamodb_client() -> Client {
     let config = aws_config::load_defaults(BehaviorVersion::latest()).await;
@@ -17,7 +21,7 @@ pub async fn get_item_value(
 
     let output = client
         .query()
-        .table_name(TABLE_NAME)
+        .table_name(get_table_name())
         .key_condition_expression("part = :part AND idx = :idx")
         .expression_attribute_values(":part", AttributeValue::S(part))
         .expression_attribute_values(":idx", AttributeValue::S(idx))
@@ -50,7 +54,7 @@ pub async fn put_item(
 
     client
         .put_item()
-        .table_name(TABLE_NAME)
+        .table_name(get_table_name())
         .set_item(Some(item))
         .send()
         .await?;
@@ -70,7 +74,7 @@ pub async fn delete_item(
 
     client
         .delete_item()
-        .table_name(TABLE_NAME)
+        .table_name(get_table_name())
         .set_key(Some(key))
         .send()
         .await?;
