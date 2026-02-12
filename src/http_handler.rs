@@ -1,9 +1,38 @@
 use crate::dynamodb::{delete_item, get_item_value, put_item};
-use crate::s3::{build_key, get_base_path, list_objects, presign_delete, presign_download, presign_upload};
+use crate::gemini::generate_content;
+use crate::s3::{
+    build_key, get_base_path, list_objects, presign_delete, presign_download, presign_upload,
+};
 use lambda_http::http::StatusCode;
 use lambda_http::{Body, Error, Request, Response};
 use serde::Deserialize;
 use serde_json::json;
+
+#[derive(Deserialize)]
+struct ChatPayload {
+    message: String,
+}
+
+async fn handle_chat(req: Request) -> Result<Response<Body>, Error> {
+    let body = req.body();
+    let payload: ChatPayload = match body {
+        Body::Text(s) => serde_json::from_str(s)?,
+        Body::Binary(b) => serde_json::from_slice(b)?,
+        _ => return text_response(400, "Invalid body".to_string()),
+    };
+
+    if payload.message.is_empty() {
+        return text_response(400, "message is required".to_string());
+    }
+
+    match generate_content(&payload.message).await {
+        Ok(reply) => json_response(200, json!({ "reply": reply })),
+        Err(e) => {
+            tracing::error!("gemini error: {:?}", e);
+            text_response(500, format!("gemini error: {}", e))
+        }
+    }
+}
 
 fn add_cors_headers(response: &mut Response<Body>) {
     response
@@ -255,6 +284,14 @@ pub async fn function_handler(req: Request) -> Result<Response<Body>, Error> {
 
     if path == "/api/s3/delete-url" && method == "GET" {
         return handle_s3_delete_url(req).await;
+    }
+
+    if path == "/api/s3/delete-url" && method == "GET" {
+        return handle_s3_delete_url(req).await;
+    }
+
+    if path == "/api/chat" && method == "POST" {
+        return handle_chat(req).await;
     }
 
     text_response(404, format!("not found: {method} {path}"))

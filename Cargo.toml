@@ -14,7 +14,10 @@ tracing = "0.1.43"
 aws-config = "1.8.12"
 aws-sdk-s3 = "1.117.0"
 aws-sdk-dynamodb = "1.101.0"
+gcp_auth = "0.12.2"
 
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rustls = { version = "0.23", features = ["ring"] }
 tokio = { version = "1.48.0", features = ["macros", "rt-multi-thread"] }
 url = "2.5.7"
 http = "0.2.12"
