@@ -1,7 +1,10 @@
+use crate::config::get_config;
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;
-use std::path::Path;
+use std::sync::OnceLock;
+
+static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
 #[derive(Serialize, Debug)]
 struct GeminiRequest {
@@ -45,16 +48,16 @@ fn init_credentials() {
 
     if let Ok(json_content) = env::var("GOOGLE_CREDENTIALS_JSON") {
         let path = "/tmp/gcp_sa_key.json";
-        // Write file if it doesn't exist
-        if !Path::new(path).exists() {
+        let should_write = match fs::read_to_string(path) {
+            Ok(existing) => existing != json_content,
+            Err(_) => true,
+        };
+        if should_write {
             if let Err(e) = fs::write(path, &json_content) {
                 tracing::error!("Failed to write GCP credentials to /tmp: {}", e);
                 return;
             }
         }
-        // Set the environment variable so gcp_auth can find it
-        // SAFETY: This is safe as long as we don't have other threads reading/setting this env var concurrently during init.
-        // In Lambda, this is typically fine as it's sequential per invocation or initialized at start.
         env::set_var("GOOGLE_APPLICATION_CREDENTIALS", path);
         tracing::info!("Initialized GOOGLE_APPLICATION_CREDENTIALS from JSON env var");
     }
@@ -76,7 +79,10 @@ pub async fn generate_content(prompt: &str) -> Result<String, String> {
         .await
         .map_err(|e| format!("Failed to get token: {}", e))?;
 
-    let url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent";
+    let url = format!(
+        "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
+        get_config().gemini_model
+    );
 
     let request_body = GeminiRequest {
         contents: vec![Content {
@@ -86,12 +92,17 @@ pub async fn generate_content(prompt: &str) -> Result<String, String> {
         }],
     };
 
-    let client = reqwest::Client::new();
-    let res = client
+    let client = HTTP_CLIENT.get_or_init(reqwest::Client::new);
+    let mut request = client
         .post(url)
         .bearer_auth(token.as_str())
-        .header("x-goog-user-project", "deepria") // Optional, can be ignored or fetched if needed
-        .json(&request_body)
+        .json(&request_body);
+
+    if let Some(project_id) = &get_config().google_project_id {
+        request = request.header("x-goog-user-project", project_id);
+    }
+
+    let res = request
         .send()
         .await
         .map_err(|e| format!("Failed to send request: {}", e))?;
@@ -110,14 +121,37 @@ pub async fn generate_content(prompt: &str) -> Result<String, String> {
         .await
         .map_err(|e| format!("Failed to parse response: {}", e))?;
 
-    let text = gemini_res
+    let text = extract_text(gemini_res).unwrap_or_else(|| "No response generated".to_string());
+
+    Ok(text)
+}
+
+fn extract_text(response: GeminiResponse) -> Option<String> {
+    response
         .candidates
         .and_then(|c| c.into_iter().next())
         .and_then(|c| c.content)
         .and_then(|c| c.parts)
         .and_then(|p| p.into_iter().next())
         .and_then(|p| p.text)
-        .unwrap_or_else(|| "No response generated".to_string());
+}
 
-    Ok(text)
+#[cfg(test)]
+mod tests {
+    use super::{extract_text, Candidate, CandidateContent, CandidatePart, GeminiResponse};
+
+    #[test]
+    fn extracts_text_from_response() {
+        let response = GeminiResponse {
+            candidates: Some(vec![Candidate {
+                content: Some(CandidateContent {
+                    parts: Some(vec![CandidatePart {
+                        text: Some("hello".to_string()),
+                    }]),
+                }),
+            }]),
+        };
+
+        assert_eq!(extract_text(response).as_deref(), Some("hello"));
+    }
 }

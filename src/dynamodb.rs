@@ -1,60 +1,74 @@
+use crate::config::get_config;
 use aws_config::BehaviorVersion;
 use aws_sdk_dynamodb::{types::AttributeValue, Client};
 use std::collections::HashMap;
+use tokio::sync::OnceCell;
 
+static DYNAMODB_CLIENT: OnceCell<Client> = OnceCell::const_new();
 
-fn get_table_name() -> String {
-    std::env::var("DYNAMODB_TABLE").unwrap_or_else(|_| "blog_deepria_master".to_string())
+async fn dynamodb_client() -> &'static Client {
+    DYNAMODB_CLIENT
+        .get_or_init(|| async {
+            let config = aws_config::load_defaults(BehaviorVersion::latest()).await;
+            Client::new(&config)
+        })
+        .await
 }
 
-
-pub async fn dynamodb_client() -> Client {
-    let config = aws_config::load_defaults(BehaviorVersion::latest()).await;
-    Client::new(&config)
-}
-
-pub async fn get_item_value(
-    part: String,
-    idx: String,
+pub async fn get_value(
+    part: &str,
+    idx: &str,
 ) -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> {
     let client = dynamodb_client().await;
 
+    let mut key = HashMap::new();
+    key.insert("part".to_string(), AttributeValue::S(part.to_string()));
+    key.insert("idx".to_string(), AttributeValue::S(idx.to_string()));
+
     let output = client
-        .query()
-        .table_name(get_table_name())
-        .key_condition_expression("part = :part AND idx = :idx")
-        .expression_attribute_values(":part", AttributeValue::S(part))
-        .expression_attribute_values(":idx", AttributeValue::S(idx))
+        .get_item()
+        .table_name(&get_config().dynamodb_table)
+        .set_key(Some(key))
         .send()
         .await?;
 
-    let items_opt = output.items;
-    let first_item = match items_opt.and_then(|mut items| items.pop()) {
-        Some(item) => item,
-        None => return Ok(None),
-    };
-    let value = match first_item.get("value") {
-        Some(AttributeValue::S(s)) => Some(s.clone()),
-        _ => None,
-    };
+    let value = output
+        .item
+        .and_then(|item| item.get("value").cloned())
+        .and_then(|attr| match attr {
+            AttributeValue::S(value) => Some(value),
+            _ => None,
+        });
+
     Ok(value)
 }
 
-pub async fn put_item(
-    part: String,
-    idx: String,
+pub async fn get_json<T: serde::de::DeserializeOwned>(
+    part: &str,
+    idx: &str,
+) -> Result<Option<T>, Box<dyn std::error::Error + Send + Sync>> {
+    let value = get_value(part, idx).await?;
+    value
+        .map(|raw| serde_json::from_str(&raw))
+        .transpose()
+        .map_err(|e| e.into())
+}
+
+pub async fn put_value(
+    part: &str,
+    idx: &str,
     value: String,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let client = dynamodb_client().await;
 
     let mut item = HashMap::new();
-    item.insert("part".to_string(), AttributeValue::S(part));
-    item.insert("idx".to_string(), AttributeValue::S(idx));
+    item.insert("part".to_string(), AttributeValue::S(part.to_string()));
+    item.insert("idx".to_string(), AttributeValue::S(idx.to_string()));
     item.insert("value".to_string(), AttributeValue::S(value));
 
     client
         .put_item()
-        .table_name(get_table_name())
+        .table_name(&get_config().dynamodb_table)
         .set_item(Some(item))
         .send()
         .await?;
@@ -62,19 +76,27 @@ pub async fn put_item(
     Ok(())
 }
 
-pub async fn delete_item(
-    part: String,
-    idx: String,
+pub async fn put_json<T: serde::Serialize>(
+    part: &str,
+    idx: &str,
+    value: &T,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    put_value(part, idx, serde_json::to_string(value)?).await
+}
+
+pub async fn delete_value(
+    part: &str,
+    idx: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let client = dynamodb_client().await;
 
     let mut key = HashMap::new();
-    key.insert("part".to_string(), AttributeValue::S(part));
-    key.insert("idx".to_string(), AttributeValue::S(idx));
+    key.insert("part".to_string(), AttributeValue::S(part.to_string()));
+    key.insert("idx".to_string(), AttributeValue::S(idx.to_string()));
 
     client
         .delete_item()
-        .table_name(get_table_name())
+        .table_name(&get_config().dynamodb_table)
         .set_key(Some(key))
         .send()
         .await?;

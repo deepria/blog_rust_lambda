@@ -1,8 +1,12 @@
 use lambda_http::{run, service_fn, tracing, Error};
-mod http_handler;
+mod api;
+mod config;
+mod domain;
 mod dynamodb;
-mod s3;
 mod gemini;
+mod http_handler;
+mod routes;
+mod s3;
 
 use http_handler::function_handler;
 
