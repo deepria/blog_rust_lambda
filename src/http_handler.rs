@@ -17,6 +17,7 @@ pub async fn function_handler(req: Request) -> Result<Response<Body>, Error> {
     match path.as_str() {
         "/health" => api::ok(&req, serde_json::json!({ "status": "ok" })),
         "/api/chat" if req.method() == "POST" => routes::chat::handle(req).await,
+        "/api/clipboard" => routes::clipboard::handle(req).await,
         "/api/todos" => routes::todos::handle_todos(req).await,
         "/api/todo-meta" => routes::todos::handle_meta(req).await,
         "/api/memos" => routes::memos::handle_collection(req).await,
