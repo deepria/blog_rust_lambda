@@ -1,4 +1,4 @@
-# Introduction
+# Introduction 
 
 blog_rust_lambda is a Rust project that implements an AWS Lambda function in Rust.
 
