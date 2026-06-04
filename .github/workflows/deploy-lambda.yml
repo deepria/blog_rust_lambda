@@ -45,11 +45,44 @@ jobs:
       - name: Test
         run: cargo test --locked
 
+      - name: Determine Lambda architecture
+        run: |
+          ARCHITECTURE="$(aws lambda get-function-configuration \
+            --function-name "${LAMBDA_FUNCTION_NAME}" \
+            --query 'Architectures[0]' \
+            --output text)"
+
+          case "${ARCHITECTURE}" in
+            arm64)
+              echo "CARGO_LAMBDA_ARCH=--arm64" >> "${GITHUB_ENV}"
+              ;;
+            x86_64)
+              echo "CARGO_LAMBDA_ARCH=--x86-64" >> "${GITHUB_ENV}"
+              ;;
+            *)
+              echo "Unsupported Lambda architecture: ${ARCHITECTURE}" >&2
+              exit 1
+              ;;
+          esac
+
       - name: Build Lambda
-        run: cargo lambda build --release --arm64
+        run: cargo lambda build --release ${CARGO_LAMBDA_ARCH} --output-format zip
 
       - name: Check Lambda artifact
-        run: ls -la target/lambda/blog_rust_lambda
+        run: |
+          ls -la target/lambda/blog_rust_lambda
+          unzip -l target/lambda/blog_rust_lambda/bootstrap.zip
+          unzip -l target/lambda/blog_rust_lambda/bootstrap.zip | grep -q " bootstrap$"
 
       - name: Deploy Lambda
-        run: cargo lambda deploy ${{ env.LAMBDA_FUNCTION_NAME }} --binary-name blog_rust_lambda --description "${{ github.sha }}"
+        run: |
+          aws lambda update-function-code \
+            --function-name "${LAMBDA_FUNCTION_NAME}" \
+            --zip-file fileb://target/lambda/blog_rust_lambda/bootstrap.zip
+
+          aws lambda wait function-updated \
+            --function-name "${LAMBDA_FUNCTION_NAME}"
+
+          aws lambda update-function-configuration \
+            --function-name "${LAMBDA_FUNCTION_NAME}" \
+            --description "${GITHUB_SHA}"
