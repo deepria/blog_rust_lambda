@@ -5,7 +5,9 @@ on:
     branches:
       - main
     paths:
-      - "blog_rust_lambda/**"
+      - "src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
       - ".github/workflows/deploy-lambda.yml"
 
 permissions:
@@ -19,10 +21,6 @@ env:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-
-    defaults:
-      run:
-        working-directory: blog_rust_lambda
 
     steps:
       - name: Checkout
