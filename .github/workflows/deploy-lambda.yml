@@ -48,5 +48,8 @@ jobs:
       - name: Build Lambda
         run: cargo lambda build --release --arm64
 
+      - name: Check Lambda artifact
+        run: ls -la target/lambda/blog_rust_lambda
+
       - name: Deploy Lambda
-        run: cargo lambda deploy ${{ env.LAMBDA_FUNCTION_NAME }} --description "${{ github.sha }}"
+        run: cargo lambda deploy ${{ env.LAMBDA_FUNCTION_NAME }} --binary-name blog_rust_lambda --description "${{ github.sha }}"
