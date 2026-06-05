@@ -25,6 +25,18 @@ pub async fn function_handler(req: Request) -> Result<Response<Body>, Error> {
         "/api/files/presign-upload" if req.method() == "POST" => {
             routes::files::handle_presign_upload(req).await
         }
+        "/api/files/multipart/initiate" if req.method() == "POST" => {
+            routes::files::handle_multipart_initiate(req).await
+        }
+        "/api/files/multipart/presign-part" if req.method() == "POST" => {
+            routes::files::handle_multipart_presign_part(req).await
+        }
+        "/api/files/multipart/complete" if req.method() == "POST" => {
+            routes::files::handle_multipart_complete(req).await
+        }
+        "/api/files/multipart/abort" if req.method() == "POST" => {
+            routes::files::handle_multipart_abort(req).await
+        }
         "/api/files/presign-download" if req.method() == "POST" => {
             routes::files::handle_presign_download(req).await
         }

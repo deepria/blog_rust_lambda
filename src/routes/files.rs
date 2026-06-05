@@ -1,5 +1,8 @@
 use crate::api::{self, ApiError};
-use crate::domain::files::{self, AccessRequest, UploadRequest};
+use crate::domain::files::{
+    self, AbortMultipartRequest, AccessRequest, CompleteMultipartRequest, MultipartPartRequest,
+    UploadRequest,
+};
 use lambda_http::http::StatusCode;
 use lambda_http::{Body, Error, Request, Response};
 
@@ -21,6 +24,38 @@ pub async fn handle_presign_upload(req: Request) -> Result<Response<Body>, Error
     let payload = parse_json_body::<UploadRequest>(&req)?;
     match files::create_upload(payload).await {
         Ok(data) => api::ok(&req, data),
+        Err(error) => api::map_error(&req, StatusCode::BAD_REQUEST, error),
+    }
+}
+
+pub async fn handle_multipart_initiate(req: Request) -> Result<Response<Body>, Error> {
+    let payload = parse_json_body::<UploadRequest>(&req)?;
+    match files::initiate_multipart_upload(payload).await {
+        Ok(data) => api::ok(&req, data),
+        Err(error) => api::map_error(&req, StatusCode::BAD_REQUEST, error),
+    }
+}
+
+pub async fn handle_multipart_presign_part(req: Request) -> Result<Response<Body>, Error> {
+    let payload = parse_json_body::<MultipartPartRequest>(&req)?;
+    match files::create_upload_part(payload).await {
+        Ok(data) => api::ok(&req, data),
+        Err(error) => api::map_error(&req, StatusCode::BAD_REQUEST, error),
+    }
+}
+
+pub async fn handle_multipart_complete(req: Request) -> Result<Response<Body>, Error> {
+    let payload = parse_json_body::<CompleteMultipartRequest>(&req)?;
+    match files::finish_multipart_upload(payload).await {
+        Ok(_) => api::ok(&req, serde_json::json!({ "ok": true })),
+        Err(error) => api::map_error(&req, StatusCode::BAD_REQUEST, error),
+    }
+}
+
+pub async fn handle_multipart_abort(req: Request) -> Result<Response<Body>, Error> {
+    let payload = parse_json_body::<AbortMultipartRequest>(&req)?;
+    match files::cancel_multipart_upload(payload).await {
+        Ok(_) => api::ok(&req, serde_json::json!({ "ok": true })),
         Err(error) => api::map_error(&req, StatusCode::BAD_REQUEST, error),
     }
 }

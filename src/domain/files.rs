@@ -2,7 +2,9 @@ use crate::api::{ApiError, AppResult};
 use crate::config::get_config;
 use crate::dynamodb::{delete_value, get_json, get_value, put_json};
 use crate::s3::{
-    build_key, delete_object, list_objects, presign_delete, presign_download, presign_upload,
+    abort_multipart_upload, build_key, complete_multipart_upload, create_multipart_upload,
+    delete_object, list_objects, presign_delete, presign_download, presign_upload,
+    presign_upload_part,
 };
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
@@ -45,6 +47,44 @@ pub struct UploadResponse {
     pub key: String,
     pub upload_url: String,
     pub display_name: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MultipartPartRequest {
+    pub key: String,
+    pub upload_id: String,
+    pub part_number: i32,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CompletedUploadPart {
+    pub part_number: i32,
+    pub etag: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CompleteMultipartRequest {
+    pub key: String,
+    pub upload_id: String,
+    pub parts: Vec<CompletedUploadPart>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AbortMultipartRequest {
+    pub key: String,
+    pub upload_id: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MultipartUploadResponse {
+    pub key: String,
+    pub upload_id: String,
+    pub display_name: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct UploadPartResponse {
+    pub url: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -150,6 +190,131 @@ pub async fn create_upload(payload: UploadRequest) -> AppResult<UploadResponse> 
     })
 }
 
+pub async fn initiate_multipart_upload(
+    payload: UploadRequest,
+) -> AppResult<MultipartUploadResponse> {
+    let filename = payload.filename.trim();
+    if filename.is_empty() {
+        return Err(ApiError::bad_request("filename is required"));
+    }
+    if filename.len() > 255 {
+        return Err(ApiError::bad_request("filename is too long"));
+    }
+
+    let display_name = payload
+        .display_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(filename)
+        .to_string();
+    let safe_key = generate_storage_name(filename);
+    let key = build_key(&get_config().s3_base_path, "", None, None, &safe_key);
+    let content_type = payload
+        .content_type
+        .unwrap_or_else(|| "application/octet-stream".to_string());
+    let upload_id = create_multipart_upload(key, content_type)
+        .await
+        .map_err(ApiError::internal)?;
+
+    let meta = FileMeta {
+        key: safe_key.clone(),
+        display_name: display_name.clone(),
+        auth_hash: payload
+            .auth_key
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .map(hash_auth_key),
+        created_at: Some(now_ts()),
+    };
+
+    put_json(FILE_META_PART, &safe_key, &meta)
+        .await
+        .map_err(ApiError::internal)?;
+
+    Ok(MultipartUploadResponse {
+        key: safe_key,
+        upload_id,
+        display_name,
+    })
+}
+
+pub async fn create_upload_part(payload: MultipartPartRequest) -> AppResult<UploadPartResponse> {
+    let key = validate_key(&payload.key)?;
+    let upload_id = validate_upload_id(&payload.upload_id)?;
+    if payload.part_number < 1 || payload.part_number > 10_000 {
+        return Err(ApiError::bad_request(
+            "part_number must be between 1 and 10000",
+        ));
+    }
+
+    let url = presign_upload_part(
+        build_key(&get_config().s3_base_path, "", None, None, &key),
+        upload_id,
+        payload.part_number,
+    )
+    .await
+    .map_err(ApiError::internal)?;
+
+    Ok(UploadPartResponse { url })
+}
+
+pub async fn finish_multipart_upload(payload: CompleteMultipartRequest) -> AppResult<()> {
+    let key = validate_key(&payload.key)?;
+    let upload_id = validate_upload_id(&payload.upload_id)?;
+    if payload.parts.is_empty() {
+        return Err(ApiError::bad_request("parts are required"));
+    }
+    if payload.parts.len() > 10_000 {
+        return Err(ApiError::bad_request("too many parts"));
+    }
+
+    let mut parts = payload
+        .parts
+        .into_iter()
+        .map(|part| {
+            if part.part_number < 1 || part.part_number > 10_000 {
+                return Err(ApiError::bad_request(
+                    "part_number must be between 1 and 10000",
+                ));
+            }
+            let etag = part.etag.trim();
+            if etag.is_empty() {
+                return Err(ApiError::bad_request("etag is required"));
+            }
+            Ok((part.part_number, etag.to_string()))
+        })
+        .collect::<AppResult<Vec<_>>>()?;
+    parts.sort_by_key(|(part_number, _)| *part_number);
+
+    complete_multipart_upload(
+        build_key(&get_config().s3_base_path, "", None, None, &key),
+        upload_id,
+        parts,
+    )
+    .await
+    .map_err(ApiError::internal)?;
+
+    Ok(())
+}
+
+pub async fn cancel_multipart_upload(payload: AbortMultipartRequest) -> AppResult<()> {
+    let key = validate_key(&payload.key)?;
+    let upload_id = validate_upload_id(&payload.upload_id)?;
+
+    abort_multipart_upload(
+        build_key(&get_config().s3_base_path, "", None, None, &key),
+        upload_id,
+    )
+    .await
+    .map_err(ApiError::internal)?;
+    delete_value(FILE_META_PART, &key)
+        .await
+        .map_err(ApiError::internal)?;
+
+    Ok(())
+}
+
 pub async fn create_download(payload: AccessRequest) -> AppResult<PresignedResponse> {
     let key = validate_key(&payload.key)?;
     assert_file_access(&key, payload.auth_key.as_deref()).await?;
@@ -252,6 +417,14 @@ fn validate_key(key: &str) -> AppResult<String> {
         return Err(ApiError::bad_request("invalid file key"));
     }
     Ok(key.to_string())
+}
+
+fn validate_upload_id(upload_id: &str) -> AppResult<String> {
+    let value = upload_id.trim();
+    if value.is_empty() {
+        return Err(ApiError::bad_request("upload_id is required"));
+    }
+    Ok(value.to_string())
 }
 
 fn strip_base_prefix(key: &str) -> String {

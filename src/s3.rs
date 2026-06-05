@@ -1,6 +1,10 @@
 use crate::config::get_config;
 use aws_config::BehaviorVersion;
-use aws_sdk_s3::{presigning::PresigningConfig, Client};
+use aws_sdk_s3::{
+    presigning::PresigningConfig,
+    types::{CompletedMultipartUpload, CompletedPart},
+    Client,
+};
 use std::time::Duration;
 use tokio::sync::OnceCell;
 use url::form_urlencoded;
@@ -68,6 +72,93 @@ pub async fn presign_upload(
         .await?;
 
     Ok(presigned.uri().to_string())
+}
+
+pub async fn create_multipart_upload(
+    key: String,
+    content_type: String,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let client = s3_client().await;
+
+    let output = client
+        .create_multipart_upload()
+        .bucket(&get_config().s3_bucket)
+        .key(key)
+        .content_type(content_type)
+        .send()
+        .await?;
+
+    output
+        .upload_id()
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| "missing multipart upload id".into())
+}
+
+pub async fn presign_upload_part(
+    key: String,
+    upload_id: String,
+    part_number: i32,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let client = s3_client().await;
+
+    let presigned = client
+        .upload_part()
+        .bucket(&get_config().s3_bucket)
+        .key(key)
+        .upload_id(upload_id)
+        .part_number(part_number)
+        .presigned(PresigningConfig::expires_in(Duration::from_secs(3600))?)
+        .await?;
+
+    Ok(presigned.uri().to_string())
+}
+
+pub async fn complete_multipart_upload(
+    key: String,
+    upload_id: String,
+    parts: Vec<(i32, String)>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let client = s3_client().await;
+    let completed_parts = parts
+        .into_iter()
+        .map(|(part_number, e_tag)| {
+            CompletedPart::builder()
+                .part_number(part_number)
+                .e_tag(e_tag)
+                .build()
+        })
+        .collect();
+    let completed_upload = CompletedMultipartUpload::builder()
+        .set_parts(Some(completed_parts))
+        .build();
+
+    client
+        .complete_multipart_upload()
+        .bucket(&get_config().s3_bucket)
+        .key(key)
+        .upload_id(upload_id)
+        .multipart_upload(completed_upload)
+        .send()
+        .await?;
+
+    Ok(())
+}
+
+pub async fn abort_multipart_upload(
+    key: String,
+    upload_id: String,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let client = s3_client().await;
+
+    client
+        .abort_multipart_upload()
+        .bucket(&get_config().s3_bucket)
+        .key(key)
+        .upload_id(upload_id)
+        .send()
+        .await?;
+
+    Ok(())
 }
 
 pub async fn presign_download(
