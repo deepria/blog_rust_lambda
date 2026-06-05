@@ -6,7 +6,6 @@ use uuid::Uuid;
 
 const NOTE_PART: &str = "NOTE";
 const NOTE_LIST_PART: &str = "NOTE_LIST";
-const NOTE_LIST_IDX: &str = "INDEX";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Memo {
@@ -30,21 +29,23 @@ pub struct UpsertMemoRequest {
     pub content: String,
 }
 
-pub async fn list_memos() -> AppResult<Vec<MemoSummary>> {
-    let raw = get_value(NOTE_LIST_PART, NOTE_LIST_IDX)
+pub async fn list_memos(user_id: &str) -> AppResult<Vec<MemoSummary>> {
+    let raw = get_value(NOTE_LIST_PART, &memo_list_idx(user_id))
         .await
         .map_err(ApiError::internal)?;
     Ok(parse_summary_list(raw.as_deref()))
 }
 
-pub async fn get_memo(id: &str) -> AppResult<Memo> {
+pub async fn get_memo(user_id: &str, id: &str) -> AppResult<Memo> {
     validate_id(id)?;
-    let raw = get_value(NOTE_PART, id).await.map_err(ApiError::internal)?;
+    let raw = get_value(NOTE_PART, &memo_idx(user_id, id))
+        .await
+        .map_err(ApiError::internal)?;
     let raw = raw.ok_or_else(|| ApiError::not_found("memo not found"))?;
     parse_memo(&raw)
 }
 
-pub async fn create_memo(payload: UpsertMemoRequest) -> AppResult<Memo> {
+pub async fn create_memo(user_id: &str, payload: UpsertMemoRequest) -> AppResult<Memo> {
     let id = Uuid::new_v4().to_string();
     let now = now_iso();
     let memo = Memo {
@@ -54,43 +55,43 @@ pub async fn create_memo(payload: UpsertMemoRequest) -> AppResult<Memo> {
         created_at: now.clone(),
         updated_at: now,
     };
-    persist_memo(&memo).await?;
+    persist_memo(user_id, &memo).await?;
     Ok(memo)
 }
 
-pub async fn update_memo(id: &str, payload: UpsertMemoRequest) -> AppResult<Memo> {
+pub async fn update_memo(user_id: &str, id: &str, payload: UpsertMemoRequest) -> AppResult<Memo> {
     validate_id(id)?;
-    let mut current = get_memo(id).await?;
+    let mut current = get_memo(user_id, id).await?;
     current.title = payload.title.trim().to_string();
     current.content = payload.content;
     current.updated_at = now_iso();
-    persist_memo(&current).await?;
+    persist_memo(user_id, &current).await?;
     Ok(current)
 }
 
-pub async fn delete_memo(id: &str) -> AppResult<()> {
+pub async fn delete_memo(user_id: &str, id: &str) -> AppResult<()> {
     validate_id(id)?;
-    delete_value(NOTE_PART, id)
+    delete_value(NOTE_PART, &memo_idx(user_id, id))
         .await
         .map_err(ApiError::internal)?;
-    let summaries = list_memos().await?;
+    let summaries = list_memos(user_id).await?;
     let updated = summaries
         .into_iter()
         .filter(|item| item.id != id)
         .collect::<Vec<_>>();
-    save_summary_list(&updated).await?;
+    save_summary_list(user_id, &updated).await?;
     Ok(())
 }
 
-async fn persist_memo(memo: &Memo) -> AppResult<()> {
+async fn persist_memo(user_id: &str, memo: &Memo) -> AppResult<()> {
     validate_payload(&memo.title, &memo.content)?;
     let raw = serde_json::to_string(memo)
         .map_err(|e| ApiError::internal(format!("failed to serialize memo: {e}")))?;
-    put_value(NOTE_PART, &memo.id, raw)
+    put_value(NOTE_PART, &memo_idx(user_id, &memo.id), raw)
         .await
         .map_err(ApiError::internal)?;
 
-    let mut summaries = list_memos().await?;
+    let mut summaries = list_memos(user_id).await?;
     let summary = MemoSummary {
         id: memo.id.clone(),
         title: memo.title.clone(),
@@ -101,16 +102,24 @@ async fn persist_memo(memo: &Memo) -> AppResult<()> {
     } else {
         summaries.insert(0, summary);
     }
-    save_summary_list(&summaries).await
+    save_summary_list(user_id, &summaries).await
 }
 
-async fn save_summary_list(items: &[MemoSummary]) -> AppResult<()> {
+async fn save_summary_list(user_id: &str, items: &[MemoSummary]) -> AppResult<()> {
     let raw = serde_json::to_string(&serde_json::json!({ "data": items }))
         .map_err(|e| ApiError::internal(format!("failed to serialize memo index: {e}")))?;
-    put_value(NOTE_LIST_PART, NOTE_LIST_IDX, raw)
+    put_value(NOTE_LIST_PART, &memo_list_idx(user_id), raw)
         .await
         .map_err(ApiError::internal)?;
     Ok(())
+}
+
+fn memo_idx(user_id: &str, id: &str) -> String {
+    format!("user:{user_id}:memo:{id}")
+}
+
+fn memo_list_idx(user_id: &str) -> String {
+    format!("user:{user_id}:INDEX")
 }
 
 fn parse_memo(raw: &str) -> AppResult<Memo> {

@@ -1,4 +1,5 @@
 use crate::config::get_config;
+use lambda_http::http::header;
 use lambda_http::http::{HeaderValue, StatusCode};
 use lambda_http::{Body, Error, Request, Response};
 use serde::Serialize;
@@ -44,6 +45,14 @@ impl ApiError {
         }
     }
 
+    pub fn forbidden(message: impl std::fmt::Display) -> Self {
+        Self {
+            code: "forbidden".to_string(),
+            message: message.to_string(),
+            details: None,
+        }
+    }
+
     pub fn internal(message: impl std::fmt::Display) -> Self {
         Self {
             code: "internal_error".to_string(),
@@ -55,6 +64,38 @@ impl ApiError {
 
 pub fn ok<T: Serialize>(req: &Request, data: T) -> Result<Response<Body>, Error> {
     response(req, StatusCode::OK, &ApiResponse { data })
+}
+
+pub fn redirect(req: &Request, location: &str) -> Result<Response<Body>, Error> {
+    let mut response = Response::new(Body::Empty);
+    *response.status_mut() = StatusCode::FOUND;
+    response
+        .headers_mut()
+        .insert(header::LOCATION, HeaderValue::from_str(location)?);
+    apply_headers(req, &mut response)?;
+    Ok(response)
+}
+
+pub fn ok_with_cookies<T: Serialize>(
+    req: &Request,
+    data: T,
+    cookies: &[String],
+) -> Result<Response<Body>, Error> {
+    response_with_cookies(req, StatusCode::OK, &ApiResponse { data }, cookies)
+}
+
+pub fn redirect_with_cookies(
+    req: &Request,
+    location: &str,
+    cookies: &[String],
+) -> Result<Response<Body>, Error> {
+    let mut response = redirect(req, location)?;
+    for cookie in cookies {
+        response
+            .headers_mut()
+            .append(header::SET_COOKIE, HeaderValue::from_str(cookie)?);
+    }
+    Ok(response)
 }
 
 pub fn created<T: Serialize>(req: &Request, data: T) -> Result<Response<Body>, Error> {
@@ -109,6 +150,21 @@ fn response<T: Serialize>(
     Ok(response)
 }
 
+fn response_with_cookies<T: Serialize>(
+    req: &Request,
+    status: StatusCode,
+    payload: &T,
+    cookies: &[String],
+) -> Result<Response<Body>, Error> {
+    let mut response = response(req, status, payload)?;
+    for cookie in cookies {
+        response
+            .headers_mut()
+            .append(header::SET_COOKIE, HeaderValue::from_str(cookie)?);
+    }
+    Ok(response)
+}
+
 fn apply_headers(req: &Request, response: &mut Response<Body>) -> Result<(), Error> {
     response.headers_mut().insert(
         "content-type",
@@ -131,6 +187,10 @@ fn apply_headers(req: &Request, response: &mut Response<Body>) -> Result<(), Err
     response.headers_mut().insert(
         "Access-Control-Allow-Headers",
         HeaderValue::from_static("Content-Type,Authorization"),
+    );
+    response.headers_mut().insert(
+        "Access-Control-Allow-Credentials",
+        HeaderValue::from_static("true"),
     );
     response
         .headers_mut()

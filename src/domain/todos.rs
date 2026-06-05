@@ -4,8 +4,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 const TODO_PART: &str = "todo";
-const TODO_ITEMS_IDX: &str = "todo";
-const TODO_META_IDX: &str = "meta";
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct TodoMeta {
@@ -22,18 +20,18 @@ pub struct TodoOption {
     pub color: String,
 }
 
-pub async fn get_todos() -> AppResult<Vec<Value>> {
-    let raw = get_value(TODO_PART, TODO_ITEMS_IDX)
+pub async fn get_todos(user_id: &str) -> AppResult<Vec<Value>> {
+    let raw = get_value(TODO_PART, &todo_items_idx(user_id))
         .await
         .map_err(ApiError::internal)?;
     parse_todo_items(raw.as_deref())
 }
 
-pub async fn save_todos(items: Vec<Value>) -> AppResult<Vec<Value>> {
+pub async fn save_todos(user_id: &str, items: Vec<Value>) -> AppResult<Vec<Value>> {
     validate_items(&items)?;
     put_value(
         TODO_PART,
-        TODO_ITEMS_IDX,
+        &todo_items_idx(user_id),
         serde_json::to_string(&items)
             .map_err(|e| ApiError::internal(format!("failed to serialize todos: {e}")))?,
     )
@@ -42,19 +40,27 @@ pub async fn save_todos(items: Vec<Value>) -> AppResult<Vec<Value>> {
     Ok(items)
 }
 
-pub async fn get_meta() -> AppResult<TodoMeta> {
-    let legacy_raw = get_value(TODO_PART, TODO_META_IDX)
+pub async fn get_meta(user_id: &str) -> AppResult<TodoMeta> {
+    let legacy_raw = get_value(TODO_PART, &todo_meta_idx(user_id))
         .await
         .map_err(ApiError::internal)?;
     Ok(parse_meta(legacy_raw.as_deref()))
 }
 
-pub async fn save_meta(mut meta: TodoMeta) -> AppResult<TodoMeta> {
+pub async fn save_meta(user_id: &str, mut meta: TodoMeta) -> AppResult<TodoMeta> {
     meta = normalize_meta(meta);
-    put_json(TODO_PART, TODO_META_IDX, &meta)
+    put_json(TODO_PART, &todo_meta_idx(user_id), &meta)
         .await
         .map_err(ApiError::internal)?;
     Ok(meta)
+}
+
+fn todo_items_idx(user_id: &str) -> String {
+    format!("user:{user_id}:todo")
+}
+
+fn todo_meta_idx(user_id: &str) -> String {
+    format!("user:{user_id}:meta")
 }
 
 fn validate_items(items: &[Value]) -> AppResult<()> {

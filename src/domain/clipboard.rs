@@ -4,7 +4,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 const CLIPBOARD_PART: &str = "clipboard";
-const CLIPBOARD_IDX: &str = "latest";
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct Clipboard {
@@ -16,25 +15,32 @@ pub struct UpsertClipboardRequest {
     pub text: String,
 }
 
-pub async fn get_clipboard() -> AppResult<Clipboard> {
-    let raw = crate::dynamodb::get_value(CLIPBOARD_PART, CLIPBOARD_IDX)
+pub async fn get_clipboard(user_id: &str) -> AppResult<Clipboard> {
+    let raw = crate::dynamodb::get_value(CLIPBOARD_PART, &clipboard_idx(user_id))
         .await
         .map_err(ApiError::internal)?;
     parse_clipboard(raw.as_deref())
 }
 
-pub async fn save_clipboard(payload: UpsertClipboardRequest) -> AppResult<Clipboard> {
+pub async fn save_clipboard(
+    user_id: &str,
+    payload: UpsertClipboardRequest,
+) -> AppResult<Clipboard> {
     validate_text(&payload.text)?;
 
     let clipboard = Clipboard { text: payload.text };
     let raw = serde_json::to_string(&clipboard)
         .map_err(|e| ApiError::internal(format!("failed to serialize clipboard: {e}")))?;
 
-    put_value(CLIPBOARD_PART, CLIPBOARD_IDX, raw)
+    put_value(CLIPBOARD_PART, &clipboard_idx(user_id), raw)
         .await
         .map_err(ApiError::internal)?;
 
     Ok(clipboard)
+}
+
+fn clipboard_idx(user_id: &str) -> String {
+    format!("user:{user_id}:latest")
 }
 
 fn validate_text(text: &str) -> AppResult<()> {

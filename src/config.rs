@@ -8,6 +8,14 @@ pub struct EnvConfig {
     pub allowed_origins: Vec<String>,
     pub google_project_id: Option<String>,
     pub gemini_model: String,
+    pub auth_base_url: String,
+    pub auth_frontend_url: String,
+    pub auth_cookie_secure: bool,
+    pub auth_allowlist_enabled: bool,
+    pub google_oauth_client_id: Option<String>,
+    pub google_oauth_client_secret: Option<String>,
+    pub github_oauth_client_id: Option<String>,
+    pub github_oauth_client_secret: Option<String>,
 }
 
 static CONFIG: OnceLock<EnvConfig> = OnceLock::new();
@@ -37,6 +45,21 @@ impl EnvConfig {
             google_project_id: std::env::var("GOOGLE_PROJECT_ID").ok(),
             gemini_model: std::env::var("GEMINI_MODEL")
                 .unwrap_or_else(|_| "gemini-3-flash-preview".to_string()),
+            auth_base_url: std::env::var("AUTH_BASE_URL")
+                .unwrap_or_else(|_| "http://localhost:8080".to_string())
+                .trim_end_matches('/')
+                .to_string(),
+            auth_frontend_url: std::env::var("AUTH_FRONTEND_URL")
+                .or_else(|_| std::env::var("FRONTEND_URL"))
+                .unwrap_or_else(|_| "http://localhost:5173".to_string())
+                .trim_end_matches('/')
+                .to_string(),
+            auth_cookie_secure: env_bool("AUTH_COOKIE_SECURE", true),
+            auth_allowlist_enabled: env_bool("AUTH_ALLOWLIST_ENABLED", false),
+            google_oauth_client_id: std::env::var("GOOGLE_OAUTH_CLIENT_ID").ok(),
+            google_oauth_client_secret: std::env::var("GOOGLE_OAUTH_CLIENT_SECRET").ok(),
+            github_oauth_client_id: std::env::var("GITHUB_OAUTH_CLIENT_ID").ok(),
+            github_oauth_client_secret: std::env::var("GITHUB_OAUTH_CLIENT_SECRET").ok(),
         }
     }
 
@@ -60,6 +83,18 @@ impl EnvConfig {
 
 fn normalize_base_path(value: &str) -> String {
     value.trim().trim_matches('/').to_string()
+}
+
+fn env_bool(name: &str, default: bool) -> bool {
+    std::env::var(name)
+        .ok()
+        .map(|value| {
+            matches!(
+                value.to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(default)
 }
 
 #[cfg(test)]

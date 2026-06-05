@@ -76,6 +76,49 @@ pub async fn put_value(
     Ok(())
 }
 
+pub async fn put_value_if_absent(
+    part: &str,
+    idx: &str,
+    value: String,
+) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+    let client = dynamodb_client().await;
+
+    let mut item = HashMap::new();
+    item.insert("part".to_string(), AttributeValue::S(part.to_string()));
+    item.insert("idx".to_string(), AttributeValue::S(idx.to_string()));
+    item.insert("value".to_string(), AttributeValue::S(value));
+
+    let result = client
+        .put_item()
+        .table_name(&get_config().dynamodb_table)
+        .set_item(Some(item))
+        .condition_expression("attribute_not_exists(#part) AND attribute_not_exists(#idx)")
+        .expression_attribute_names("#part", "part")
+        .expression_attribute_names("#idx", "idx")
+        .send()
+        .await;
+
+    match result {
+        Ok(_) => Ok(true),
+        Err(error) => {
+            let text = error.to_string();
+            if text.contains("ConditionalCheckFailed") {
+                Ok(false)
+            } else {
+                Err(error.into())
+            }
+        }
+    }
+}
+
+pub async fn put_json_if_absent<T: serde::Serialize>(
+    part: &str,
+    idx: &str,
+    value: &T,
+) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+    put_value_if_absent(part, idx, serde_json::to_string(value)?).await
+}
+
 pub async fn put_json<T: serde::Serialize>(
     part: &str,
     idx: &str,

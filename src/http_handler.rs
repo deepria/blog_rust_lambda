@@ -16,6 +16,9 @@ pub async fn function_handler(req: Request) -> Result<Response<Body>, Error> {
 
     match path.as_str() {
         "/health" => api::ok(&req, serde_json::json!({ "status": "ok" })),
+        "/api/auth/me" => routes::auth::handle_me(req).await,
+        "/api/auth/refresh" => routes::auth::handle_refresh(req).await,
+        "/api/auth/logout" => routes::auth::handle_logout(req).await,
         "/api/chat" if req.method() == "POST" => routes::chat::handle(req).await,
         "/api/clipboard" => routes::clipboard::handle(req).await,
         "/api/todos" => routes::todos::handle_todos(req).await,
@@ -46,6 +49,34 @@ pub async fn function_handler(req: Request) -> Result<Response<Body>, Error> {
         _ if path.starts_with("/api/memos/") => {
             let id = path.trim_start_matches("/api/memos/");
             routes::memos::handle_item(req, id).await
+        }
+        _ if path.starts_with("/api/auth/") && path.ends_with("/callback") => {
+            let provider = path
+                .trim_start_matches("/api/auth/")
+                .trim_end_matches("/callback")
+                .trim_matches('/');
+            routes::auth::handle_callback(req, provider).await
+        }
+        _ if path.starts_with("/api/auth/") && path.ends_with("/connect") => {
+            let provider = path
+                .trim_start_matches("/api/auth/")
+                .trim_end_matches("/connect")
+                .trim_matches('/');
+            routes::auth::handle_connect(req, provider).await
+        }
+        _ if path.starts_with("/api/auth/") && path.ends_with("/disconnect") => {
+            let provider = path
+                .trim_start_matches("/api/auth/")
+                .trim_end_matches("/disconnect")
+                .trim_matches('/');
+            routes::auth::handle_disconnect(req, provider).await
+        }
+        _ if path.starts_with("/api/auth/") && path.ends_with("/login") => {
+            let provider = path
+                .trim_start_matches("/api/auth/")
+                .trim_end_matches("/login")
+                .trim_matches('/');
+            routes::auth::handle_login(req, provider).await
         }
         _ if path.starts_with("/api/files/") && req.method() == "DELETE" => {
             let key = path.trim_start_matches("/api/files/");

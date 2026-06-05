@@ -98,8 +98,8 @@ pub struct PresignedResponse {
     pub url: String,
 }
 
-pub async fn list_files() -> AppResult<Vec<FileItem>> {
-    let prefix = get_config().s3_base_path.clone();
+pub async fn list_files(user_id: &str) -> AppResult<Vec<FileItem>> {
+    let prefix = user_base_path(user_id);
     let (_folders, files) = list_objects(if prefix.is_empty() {
         String::new()
     } else {
@@ -110,11 +110,11 @@ pub async fn list_files() -> AppResult<Vec<FileItem>> {
 
     let mut items = Vec::new();
     for key in files {
-        let normalized = strip_base_prefix(&key);
+        let normalized = strip_base_prefix(&prefix, &key);
         if normalized.is_empty() {
             continue;
         }
-        let meta = load_meta(&normalized).await?;
+        let meta = load_meta(user_id, &normalized).await?;
         let display_name = meta
             .as_ref()
             .map(|item| item.display_name.clone())
@@ -143,7 +143,7 @@ pub async fn list_files() -> AppResult<Vec<FileItem>> {
     Ok(items)
 }
 
-pub async fn create_upload(payload: UploadRequest) -> AppResult<UploadResponse> {
+pub async fn create_upload(user_id: &str, payload: UploadRequest) -> AppResult<UploadResponse> {
     let filename = payload.filename.trim();
     if filename.is_empty() {
         return Err(ApiError::bad_request("filename is required"));
@@ -160,7 +160,7 @@ pub async fn create_upload(payload: UploadRequest) -> AppResult<UploadResponse> 
         .unwrap_or(filename)
         .to_string();
     let safe_key = generate_storage_name(filename);
-    let key = build_key(&get_config().s3_base_path, "", None, None, &safe_key);
+    let key = build_key(&user_base_path(user_id), "", None, None, &safe_key);
     let content_type = payload
         .content_type
         .unwrap_or_else(|| "application/octet-stream".to_string());
@@ -179,7 +179,7 @@ pub async fn create_upload(payload: UploadRequest) -> AppResult<UploadResponse> 
         created_at: Some(now_ts()),
     };
 
-    put_json(FILE_META_PART, &safe_key, &meta)
+    put_json(FILE_META_PART, &file_meta_idx(user_id, &safe_key), &meta)
         .await
         .map_err(ApiError::internal)?;
 
@@ -191,6 +191,7 @@ pub async fn create_upload(payload: UploadRequest) -> AppResult<UploadResponse> 
 }
 
 pub async fn initiate_multipart_upload(
+    user_id: &str,
     payload: UploadRequest,
 ) -> AppResult<MultipartUploadResponse> {
     let filename = payload.filename.trim();
@@ -209,7 +210,7 @@ pub async fn initiate_multipart_upload(
         .unwrap_or(filename)
         .to_string();
     let safe_key = generate_storage_name(filename);
-    let key = build_key(&get_config().s3_base_path, "", None, None, &safe_key);
+    let key = build_key(&user_base_path(user_id), "", None, None, &safe_key);
     let content_type = payload
         .content_type
         .unwrap_or_else(|| "application/octet-stream".to_string());
@@ -228,7 +229,7 @@ pub async fn initiate_multipart_upload(
         created_at: Some(now_ts()),
     };
 
-    put_json(FILE_META_PART, &safe_key, &meta)
+    put_json(FILE_META_PART, &file_meta_idx(user_id, &safe_key), &meta)
         .await
         .map_err(ApiError::internal)?;
 
@@ -239,7 +240,10 @@ pub async fn initiate_multipart_upload(
     })
 }
 
-pub async fn create_upload_part(payload: MultipartPartRequest) -> AppResult<UploadPartResponse> {
+pub async fn create_upload_part(
+    user_id: &str,
+    payload: MultipartPartRequest,
+) -> AppResult<UploadPartResponse> {
     let key = validate_key(&payload.key)?;
     let upload_id = validate_upload_id(&payload.upload_id)?;
     if payload.part_number < 1 || payload.part_number > 10_000 {
@@ -249,7 +253,7 @@ pub async fn create_upload_part(payload: MultipartPartRequest) -> AppResult<Uplo
     }
 
     let url = presign_upload_part(
-        build_key(&get_config().s3_base_path, "", None, None, &key),
+        build_key(&user_base_path(user_id), "", None, None, &key),
         upload_id,
         payload.part_number,
     )
@@ -259,7 +263,10 @@ pub async fn create_upload_part(payload: MultipartPartRequest) -> AppResult<Uplo
     Ok(UploadPartResponse { url })
 }
 
-pub async fn finish_multipart_upload(payload: CompleteMultipartRequest) -> AppResult<()> {
+pub async fn finish_multipart_upload(
+    user_id: &str,
+    payload: CompleteMultipartRequest,
+) -> AppResult<()> {
     let key = validate_key(&payload.key)?;
     let upload_id = validate_upload_id(&payload.upload_id)?;
     if payload.parts.is_empty() {
@@ -288,7 +295,7 @@ pub async fn finish_multipart_upload(payload: CompleteMultipartRequest) -> AppRe
     parts.sort_by_key(|(part_number, _)| *part_number);
 
     complete_multipart_upload(
-        build_key(&get_config().s3_base_path, "", None, None, &key),
+        build_key(&user_base_path(user_id), "", None, None, &key),
         upload_id,
         parts,
     )
@@ -298,29 +305,35 @@ pub async fn finish_multipart_upload(payload: CompleteMultipartRequest) -> AppRe
     Ok(())
 }
 
-pub async fn cancel_multipart_upload(payload: AbortMultipartRequest) -> AppResult<()> {
+pub async fn cancel_multipart_upload(
+    user_id: &str,
+    payload: AbortMultipartRequest,
+) -> AppResult<()> {
     let key = validate_key(&payload.key)?;
     let upload_id = validate_upload_id(&payload.upload_id)?;
 
     abort_multipart_upload(
-        build_key(&get_config().s3_base_path, "", None, None, &key),
+        build_key(&user_base_path(user_id), "", None, None, &key),
         upload_id,
     )
     .await
     .map_err(ApiError::internal)?;
-    delete_value(FILE_META_PART, &key)
+    delete_value(FILE_META_PART, &file_meta_idx(user_id, &key))
         .await
         .map_err(ApiError::internal)?;
 
     Ok(())
 }
 
-pub async fn create_download(payload: AccessRequest) -> AppResult<PresignedResponse> {
+pub async fn create_download(
+    user_id: &str,
+    payload: AccessRequest,
+) -> AppResult<PresignedResponse> {
     let key = validate_key(&payload.key)?;
-    assert_file_access(&key, payload.auth_key.as_deref()).await?;
-    let display_name = resolve_display_name(&key).await?;
+    assert_file_access(user_id, &key, payload.auth_key.as_deref()).await?;
+    let display_name = resolve_display_name(user_id, &key).await?;
     let url = presign_download(
-        build_key(&get_config().s3_base_path, "", None, None, &key),
+        build_key(&user_base_path(user_id), "", None, None, &key),
         display_name,
     )
     .await
@@ -328,13 +341,13 @@ pub async fn create_download(payload: AccessRequest) -> AppResult<PresignedRespo
     Ok(PresignedResponse { url })
 }
 
-pub async fn create_delete(payload: AccessRequest) -> AppResult<PresignedResponse> {
+pub async fn create_delete(user_id: &str, payload: AccessRequest) -> AppResult<PresignedResponse> {
     let key = validate_key(&payload.key)?;
-    assert_file_access(&key, payload.auth_key.as_deref()).await?;
-    let url = presign_delete(build_key(&get_config().s3_base_path, "", None, None, &key))
+    assert_file_access(user_id, &key, payload.auth_key.as_deref()).await?;
+    let url = presign_delete(build_key(&user_base_path(user_id), "", None, None, &key))
         .await
         .map_err(ApiError::internal)?;
-    delete_value(FILE_META_PART, &key)
+    delete_value(FILE_META_PART, &file_meta_idx(user_id, &key))
         .await
         .map_err(ApiError::internal)?;
     delete_value(LEGACY_FILE_AUTH_PART, &legacy_auth_index(&key))
@@ -343,13 +356,13 @@ pub async fn create_delete(payload: AccessRequest) -> AppResult<PresignedRespons
     Ok(PresignedResponse { url })
 }
 
-pub async fn delete_file(key: &str, auth_key: Option<&str>) -> AppResult<()> {
+pub async fn delete_file(user_id: &str, key: &str, auth_key: Option<&str>) -> AppResult<()> {
     let key = validate_key(key)?;
-    assert_file_access(&key, auth_key).await?;
-    delete_object(build_key(&get_config().s3_base_path, "", None, None, &key))
+    assert_file_access(user_id, &key, auth_key).await?;
+    delete_object(build_key(&user_base_path(user_id), "", None, None, &key))
         .await
         .map_err(ApiError::internal)?;
-    delete_value(FILE_META_PART, &key)
+    delete_value(FILE_META_PART, &file_meta_idx(user_id, &key))
         .await
         .map_err(ApiError::internal)?;
     delete_value(LEGACY_FILE_AUTH_PART, &legacy_auth_index(&key))
@@ -358,8 +371,8 @@ pub async fn delete_file(key: &str, auth_key: Option<&str>) -> AppResult<()> {
     Ok(())
 }
 
-async fn assert_file_access(key: &str, auth_key: Option<&str>) -> AppResult<()> {
-    let meta = load_meta(key).await?;
+async fn assert_file_access(user_id: &str, key: &str, auth_key: Option<&str>) -> AppResult<()> {
+    let meta = load_meta(user_id, key).await?;
     if let Some(meta) = meta {
         if let Some(expected) = meta.auth_hash {
             let candidate = auth_key.unwrap_or_default();
@@ -379,8 +392,8 @@ async fn assert_file_access(key: &str, auth_key: Option<&str>) -> AppResult<()> 
     Ok(())
 }
 
-async fn load_meta(key: &str) -> AppResult<Option<FileMeta>> {
-    get_json(FILE_META_PART, key)
+async fn load_meta(user_id: &str, key: &str) -> AppResult<Option<FileMeta>> {
+    get_json(FILE_META_PART, &file_meta_idx(user_id, key))
         .await
         .map_err(ApiError::internal)
 }
@@ -399,8 +412,8 @@ async fn load_legacy_auth(key: &str) -> AppResult<Option<String>> {
     Ok(Some(value))
 }
 
-async fn resolve_display_name(key: &str) -> AppResult<String> {
-    let meta = load_meta(key).await?;
+async fn resolve_display_name(user_id: &str, key: &str) -> AppResult<String> {
+    let meta = load_meta(user_id, key).await?;
     Ok(meta
         .map(|item| item.display_name)
         .filter(|value| !value.is_empty())
@@ -427,14 +440,26 @@ fn validate_upload_id(upload_id: &str) -> AppResult<String> {
     Ok(value.to_string())
 }
 
-fn strip_base_prefix(key: &str) -> String {
-    let base = &get_config().s3_base_path;
+fn strip_base_prefix(base: &str, key: &str) -> String {
     if base.is_empty() {
         return key.trim_matches('/').to_string();
     }
     key.trim_start_matches(&format!("{base}/"))
         .trim_matches('/')
         .to_string()
+}
+
+fn user_base_path(user_id: &str) -> String {
+    let base = get_config().s3_base_path.trim_matches('/');
+    if base.is_empty() {
+        format!("users/{user_id}")
+    } else {
+        format!("{base}/users/{user_id}")
+    }
+}
+
+fn file_meta_idx(user_id: &str, key: &str) -> String {
+    format!("user:{user_id}:file:{key}")
 }
 
 fn generate_storage_name(filename: &str) -> String {
