@@ -12,7 +12,7 @@ pub async fn handle_me(req: Request) -> Result<Response<Body>, Error> {
         _ => method_not_allowed(&req),
     }
 }
-
+// -
 pub async fn handle_login(req: Request, provider: &str) -> Result<Response<Body>, Error> {
     if *req.method() != Method::GET {
         return method_not_allowed(&req);
