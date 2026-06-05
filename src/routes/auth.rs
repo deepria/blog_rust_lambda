@@ -1,7 +1,8 @@
 use crate::api::{self, ApiError};
-use crate::domain::auth::{self, AuthProvider};
+use crate::domain::auth::{self, AuthProvider, OAuthCallbackResult};
 use lambda_http::http::{Method, StatusCode};
 use lambda_http::{Body, Error, Request, Response};
+use serde::Deserialize;
 
 pub async fn handle_me(req: Request) -> Result<Response<Body>, Error> {
     match *req.method() {
@@ -23,6 +24,20 @@ pub async fn handle_login(req: Request, provider: &str) -> Result<Response<Body>
     };
     let query = query_value(&req, "returnTo");
     match auth::oauth_authorize_url(provider, false, query) {
+        Ok((url, state_cookie)) => api::redirect_with_cookies(&req, &url, &[state_cookie]),
+        Err(error) => api::map_error(&req, StatusCode::BAD_REQUEST, error),
+    }
+}
+
+pub async fn handle_mobile_login(req: Request, provider: &str) -> Result<Response<Body>, Error> {
+    if *req.method() != Method::GET {
+        return method_not_allowed(&req);
+    }
+    let provider = match AuthProvider::parse(provider) {
+        Ok(provider) => provider,
+        Err(error) => return api::map_error(&req, StatusCode::BAD_REQUEST, error),
+    };
+    match auth::mobile_oauth_authorize_url(provider) {
         Ok((url, state_cookie)) => api::redirect_with_cookies(&req, &url, &[state_cookie]),
         Err(error) => api::map_error(&req, StatusCode::BAD_REQUEST, error),
     }
@@ -69,7 +84,7 @@ pub async fn handle_callback(req: Request, provider: &str) -> Result<Response<Bo
         );
     };
     match auth::handle_oauth_callback(&req, provider, code, state).await {
-        Ok((_session, bundle, return_to)) => {
+        Ok(OAuthCallbackResult::Web { bundle, return_to }) => {
             let mut cookies = auth::session_cookies(&bundle);
             cookies.extend(
                 auth::clear_cookies()
@@ -77,6 +92,34 @@ pub async fn handle_callback(req: Request, provider: &str) -> Result<Response<Bo
                     .filter(|cookie| cookie.starts_with("dc_oauth_state=")),
             );
             api::redirect_with_cookies(&req, &return_to, &cookies)
+        }
+        Ok(OAuthCallbackResult::Mobile { redirect_to }) => {
+            let cookies = auth::clear_cookies()
+                .into_iter()
+                .filter(|cookie| cookie.starts_with("dc_oauth_state="))
+                .collect::<Vec<_>>();
+            api::redirect_with_cookies(&req, &redirect_to, &cookies)
+        }
+        Err(error) => map_auth_error(&req, error),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct MobileCompleteRequest {
+    code: String,
+}
+
+pub async fn handle_mobile_complete(req: Request) -> Result<Response<Body>, Error> {
+    if *req.method() != Method::POST {
+        return method_not_allowed(&req);
+    }
+    let payload = match parse_json_body::<MobileCompleteRequest>(&req) {
+        Ok(payload) => payload,
+        Err(error) => return Err(error),
+    };
+    match auth::complete_mobile_login(&req, &payload.code).await {
+        Ok((session, bundle)) => {
+            api::ok_with_cookies(&req, session, &auth::session_cookies(&bundle))
         }
         Err(error) => map_auth_error(&req, error),
     }
@@ -150,4 +193,12 @@ fn query_value(req: &Request, key: &str) -> Option<String> {
             .find(|(name, _)| name == key)
             .map(|(_, value)| value.to_string())
     })
+}
+
+fn parse_json_body<T: serde::de::DeserializeOwned>(req: &Request) -> Result<T, Error> {
+    match req.body() {
+        Body::Text(body) => Ok(serde_json::from_str(body)?),
+        Body::Binary(body) => Ok(serde_json::from_slice(body)?),
+        _ => Err("invalid body".into()),
+    }
 }

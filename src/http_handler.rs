@@ -19,6 +19,7 @@ pub async fn function_handler(req: Request) -> Result<Response<Body>, Error> {
         "/api/auth/me" => routes::auth::handle_me(req).await,
         "/api/auth/refresh" => routes::auth::handle_refresh(req).await,
         "/api/auth/logout" => routes::auth::handle_logout(req).await,
+        "/api/auth/mobile/complete" => routes::auth::handle_mobile_complete(req).await,
         "/api/chat" if req.method() == "POST" => routes::chat::handle(req).await,
         "/api/clipboard" => routes::clipboard::handle(req).await,
         "/api/todos" => routes::todos::handle_todos(req).await,
@@ -70,6 +71,13 @@ pub async fn function_handler(req: Request) -> Result<Response<Body>, Error> {
                 .trim_end_matches("/disconnect")
                 .trim_matches('/');
             routes::auth::handle_disconnect(req, provider).await
+        }
+        _ if path.starts_with("/api/auth/") && path.ends_with("/mobile-login") => {
+            let provider = path
+                .trim_start_matches("/api/auth/")
+                .trim_end_matches("/mobile-login")
+                .trim_matches('/');
+            routes::auth::handle_mobile_login(req, provider).await
         }
         _ if path.starts_with("/api/auth/") && path.ends_with("/login") => {
             let provider = path

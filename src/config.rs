@@ -10,6 +10,7 @@ pub struct EnvConfig {
     pub gemini_model: String,
     pub auth_base_url: String,
     pub auth_frontend_url: String,
+    pub auth_mobile_deep_link: String,
     pub auth_cookie_secure: bool,
     pub auth_allowlist_enabled: bool,
     pub google_oauth_client_id: Option<String>,
@@ -53,6 +54,10 @@ impl EnvConfig {
                 .or_else(|_| std::env::var("FRONTEND_URL"))
                 .unwrap_or_else(|_| "http://localhost:5173".to_string())
                 .trim_end_matches('/')
+                .to_string(),
+            auth_mobile_deep_link: std::env::var("AUTH_MOBILE_DEEP_LINK")
+                .unwrap_or_else(|_| "deepria://auth/callback".to_string())
+                .trim_end_matches('?')
                 .to_string(),
             auth_cookie_secure: env_bool("AUTH_COOKIE_SECURE", true),
             auth_allowlist_enabled: env_bool("AUTH_ALLOWLIST_ENABLED", false),

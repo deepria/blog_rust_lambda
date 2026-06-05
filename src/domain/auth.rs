@@ -16,12 +16,15 @@ const OAUTH_ACCOUNT_PART: &str = "OAUTH_ACCOUNT";
 const USER_OAUTH_PART: &str = "USER_OAUTH";
 const SESSION_PART: &str = "SESSION";
 const ALLOWED_EMAIL_PART: &str = "ALLOWED_EMAIL";
+const MOBILE_LOGIN_CODE_PART: &str = "MOBILE_LOGIN_CODE";
+const MOBILE_LOGIN_CODE_CLAIM_PART: &str = "MOBILE_LOGIN_CODE_CLAIM";
 const ACCESS_COOKIE: &str = "dc_session";
 const REFRESH_COOKIE: &str = "dc_refresh";
 const OAUTH_STATE_COOKIE: &str = "dc_oauth_state";
 const SESSION_DAYS: i64 = 30;
 const REFRESH_DAYS: i64 = 90;
 const STATE_MINUTES: i64 = 10;
+const MOBILE_CODE_MINUTES: i64 = 5;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -163,8 +166,30 @@ struct OAuthState {
     provider: String,
     nonce: String,
     link: bool,
+    mobile: bool,
     return_to: String,
     exp: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MobileLoginCode {
+    id: String,
+    user_id: String,
+    expires_at: String,
+    created_at: String,
+    used_at: Option<String>,
+    ip_address: Option<String>,
+    user_agent: Option<String>,
+}
+
+pub enum OAuthCallbackResult {
+    Web {
+        bundle: CookieBundle,
+        return_to: String,
+    },
+    Mobile {
+        redirect_to: String,
+    },
 }
 
 pub fn oauth_authorize_url(
@@ -172,11 +197,25 @@ pub fn oauth_authorize_url(
     link: bool,
     return_to: Option<String>,
 ) -> AppResult<(String, String)> {
+    oauth_authorize_url_with_mode(provider, link, false, return_to)
+}
+
+pub fn mobile_oauth_authorize_url(provider: AuthProvider) -> AppResult<(String, String)> {
+    oauth_authorize_url_with_mode(provider, false, true, None)
+}
+
+fn oauth_authorize_url_with_mode(
+    provider: AuthProvider,
+    link: bool,
+    mobile: bool,
+    return_to: Option<String>,
+) -> AppResult<(String, String)> {
     ensure_provider_config(&provider)?;
     let state = OAuthState {
         provider: provider.as_str().to_string(),
         nonce: Uuid::new_v4().to_string(),
         link,
+        mobile,
         return_to: sanitize_return_to(return_to),
         exp: (Utc::now() + Duration::minutes(STATE_MINUTES)).timestamp(),
     };
@@ -212,7 +251,7 @@ pub async fn handle_oauth_callback(
     provider: AuthProvider,
     code: String,
     nonce: String,
-) -> AppResult<(AuthSession, CookieBundle, String)> {
+) -> AppResult<OAuthCallbackResult> {
     let state = read_state(req)?;
     if state.provider != provider.as_str()
         || state.nonce != nonce
@@ -228,9 +267,55 @@ pub async fn handle_oauth_callback(
     } else {
         login_or_create_user(profile).await?
     };
+    if state.mobile {
+        let code = create_mobile_login_code(req, &user.id).await?;
+        return Ok(OAuthCallbackResult::Mobile {
+            redirect_to: mobile_deep_link(&code),
+        });
+    }
+    let bundle = create_session(req, &user.id).await?;
+    Ok(OAuthCallbackResult::Web {
+        bundle,
+        return_to: state.return_to,
+    })
+}
+
+pub async fn complete_mobile_login(
+    req: &Request,
+    code: &str,
+) -> AppResult<(AuthSession, CookieBundle)> {
+    let code = code.trim();
+    if code.is_empty() {
+        return Err(ApiError::bad_request("mobile login code is required"));
+    }
+    let code_hash = hash_token(code);
+    let claim_id = Uuid::new_v4().to_string();
+    let claimed = put_value_if_absent(MOBILE_LOGIN_CODE_CLAIM_PART, &code_hash, claim_id)
+        .await
+        .map_err(ApiError::internal)?;
+    if !claimed {
+        return Err(ApiError::unauthorized("mobile login code was already used"));
+    }
+
+    let mut login_code: MobileLoginCode = get_json(MOBILE_LOGIN_CODE_PART, &code_hash)
+        .await
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::unauthorized("mobile login code not found"))?;
+
+    if login_code.used_at.is_some() || parse_time(&login_code.expires_at)? <= Utc::now() {
+        return Err(ApiError::unauthorized("mobile login code expired"));
+    }
+
+    login_code.used_at = Some(now_iso());
+    put_json(MOBILE_LOGIN_CODE_PART, &code_hash, &login_code)
+        .await
+        .map_err(ApiError::internal)?;
+
+    let user = load_user(&login_code.user_id).await?;
+    assert_active_user(&user)?;
     let bundle = create_session(req, &user.id).await?;
     let auth = build_auth_session(&user).await?;
-    Ok((auth, bundle, state.return_to))
+    Ok((auth, bundle))
 }
 
 pub async fn current_session(req: &Request) -> AppResult<AuthSession> {
@@ -518,6 +603,28 @@ async fn create_session(req: &Request, user_id: &str) -> AppResult<CookieBundle>
         session_token,
         refresh_token,
     })
+}
+
+async fn create_mobile_login_code(req: &Request, user_id: &str) -> AppResult<String> {
+    let code = Uuid::new_v4().to_string();
+    let now = Utc::now();
+    let item = MobileLoginCode {
+        id: Uuid::new_v4().to_string(),
+        user_id: user_id.to_string(),
+        expires_at: (now + Duration::minutes(MOBILE_CODE_MINUTES)).to_rfc3339(),
+        created_at: now.to_rfc3339(),
+        used_at: None,
+        ip_address: header(req, "x-forwarded-for").or_else(|| header(req, "x-real-ip")),
+        user_agent: header(req, "user-agent"),
+    };
+    let code_hash = hash_token(&code);
+    let stored = put_json_if_absent(MOBILE_LOGIN_CODE_PART, &code_hash, &item)
+        .await
+        .map_err(ApiError::internal)?;
+    if !stored {
+        return Err(ApiError::internal("failed to allocate mobile login code"));
+    }
+    Ok(code)
 }
 
 async fn fetch_provider_profile(provider: &AuthProvider, code: &str) -> AppResult<ProviderProfile> {
@@ -828,6 +935,12 @@ fn sanitize_return_to(value: Option<String>) -> String {
     value
         .filter(|candidate| candidate.starts_with(&get_config().auth_frontend_url))
         .unwrap_or(default)
+}
+
+fn mobile_deep_link(code: &str) -> String {
+    let base = &get_config().auth_mobile_deep_link;
+    let separator = if base.contains('?') { "&" } else { "?" };
+    format!("{base}{separator}code={}", url_encode(code))
 }
 
 fn ensure_provider_config(provider: &AuthProvider) -> AppResult<()> {
