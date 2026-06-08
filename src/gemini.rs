@@ -7,37 +7,29 @@ use std::sync::OnceLock;
 static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
 #[derive(Serialize, Debug)]
-struct GeminiRequest {
-    contents: Vec<Content>,
+struct InteractionRequest {
+    model: String,
+    input: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    previous_interaction_id: Option<String>,
 }
 
-#[derive(Serialize, Debug)]
-struct Content {
-    parts: Vec<Part>,
-}
-
-#[derive(Serialize, Debug)]
-struct Part {
-    text: String,
-}
-
-#[derive(Deserialize, Debug)]
-struct GeminiResponse {
-    candidates: Option<Vec<Candidate>>,
+#[derive(Debug)]
+pub struct InteractionReply {
+    pub reply: String,
+    pub interaction_id: String,
 }
 
 #[derive(Deserialize, Debug)]
-struct Candidate {
-    content: Option<CandidateContent>,
+struct InteractionResponse {
+    id: Option<String>,
+    outputs: Option<Vec<InteractionOutput>>,
 }
 
 #[derive(Deserialize, Debug)]
-struct CandidateContent {
-    parts: Option<Vec<CandidatePart>>,
-}
-
-#[derive(Deserialize, Debug)]
-struct CandidatePart {
+struct InteractionOutput {
+    #[serde(rename = "type")]
+    output_type: Option<String>,
     text: Option<String>,
 }
 
@@ -63,7 +55,10 @@ fn init_credentials() {
     }
 }
 
-pub async fn generate_content(prompt: &str) -> Result<String, String> {
+pub async fn create_interaction(
+    input: &str,
+    previous_interaction_id: Option<&str>,
+) -> Result<InteractionReply, String> {
     init_credentials();
 
     let authentication_manager = gcp_auth::provider()
@@ -79,17 +74,12 @@ pub async fn generate_content(prompt: &str) -> Result<String, String> {
         .await
         .map_err(|e| format!("Failed to get token: {}", e))?;
 
-    let url = format!(
-        "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
-        get_config().gemini_model
-    );
+    let url = "https://generativelanguage.googleapis.com/v1beta/interactions";
 
-    let request_body = GeminiRequest {
-        contents: vec![Content {
-            parts: vec![Part {
-                text: prompt.to_string(),
-            }],
-        }],
+    let request_body = InteractionRequest {
+        model: get_config().gemini_model.clone(),
+        input: input.to_string(),
+        previous_interaction_id: previous_interaction_id.map(ToOwned::to_owned),
     };
 
     let client = HTTP_CLIENT.get_or_init(reqwest::Client::new);
@@ -116,42 +106,74 @@ pub async fn generate_content(prompt: &str) -> Result<String, String> {
         return Err(format!("API Error {}: {}", status, text));
     }
 
-    let gemini_res: GeminiResponse = res
+    let interaction_res: InteractionResponse = res
         .json()
         .await
         .map_err(|e| format!("Failed to parse response: {}", e))?;
 
-    let text = extract_text(gemini_res).unwrap_or_else(|| "No response generated".to_string());
+    let interaction_id = interaction_res
+        .id
+        .clone()
+        .ok_or_else(|| "Interaction response did not include an id".to_string())?;
+    let reply =
+        extract_text(&interaction_res).unwrap_or_else(|| "No response generated".to_string());
 
-    Ok(text)
+    Ok(InteractionReply {
+        reply,
+        interaction_id,
+    })
 }
 
-fn extract_text(response: GeminiResponse) -> Option<String> {
+fn extract_text(response: &InteractionResponse) -> Option<String> {
     response
-        .candidates
-        .and_then(|c| c.into_iter().next())
-        .and_then(|c| c.content)
-        .and_then(|c| c.parts)
-        .and_then(|p| p.into_iter().next())
-        .and_then(|p| p.text)
+        .outputs
+        .as_ref()
+        .and_then(|outputs| {
+            outputs
+                .iter()
+                .rev()
+                .find(|output| output.output_type.as_deref().unwrap_or("text") == "text")
+        })
+        .and_then(|output| output.text.clone())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_text, Candidate, CandidateContent, CandidatePart, GeminiResponse};
+    use super::{extract_text, InteractionOutput, InteractionResponse};
 
     #[test]
     fn extracts_text_from_response() {
-        let response = GeminiResponse {
-            candidates: Some(vec![Candidate {
-                content: Some(CandidateContent {
-                    parts: Some(vec![CandidatePart {
-                        text: Some("hello".to_string()),
-                    }]),
-                }),
+        let response = InteractionResponse {
+            id: Some("interaction-1".to_string()),
+            outputs: Some(vec![InteractionOutput {
+                output_type: Some("text".to_string()),
+                text: Some("hello".to_string()),
             }]),
         };
 
-        assert_eq!(extract_text(response).as_deref(), Some("hello"));
+        assert_eq!(extract_text(&response).as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn extracts_last_text_output() {
+        let response = InteractionResponse {
+            id: Some("interaction-1".to_string()),
+            outputs: Some(vec![
+                InteractionOutput {
+                    output_type: Some("text".to_string()),
+                    text: Some("first".to_string()),
+                },
+                InteractionOutput {
+                    output_type: Some("image".to_string()),
+                    text: None,
+                },
+                InteractionOutput {
+                    output_type: Some("text".to_string()),
+                    text: Some("last".to_string()),
+                },
+            ]),
+        };
+
+        assert_eq!(extract_text(&response).as_deref(), Some("last"));
     }
 }
