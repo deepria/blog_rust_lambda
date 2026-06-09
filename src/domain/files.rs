@@ -121,6 +121,7 @@ pub async fn list_files(user_id: &str) -> AppResult<Vec<FileItem>> {
             .filter(|value| !value.is_empty())
             .or_else(|| decode_display_name(&normalized))
             .unwrap_or_else(|| normalized.clone());
+        let display_name = ensure_display_extension(&display_name, &normalized);
 
         let has_password = meta
             .as_ref()
@@ -152,13 +153,7 @@ pub async fn create_upload(user_id: &str, payload: UploadRequest) -> AppResult<U
         return Err(ApiError::bad_request("filename is too long"));
     }
 
-    let display_name = payload
-        .display_name
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or(filename)
-        .to_string();
+    let display_name = upload_display_name(filename, payload.display_name.as_deref());
     let safe_key = generate_storage_name(filename);
     let key = build_key(&user_base_path(user_id), "", None, None, &safe_key);
     let content_type = payload
@@ -202,13 +197,7 @@ pub async fn initiate_multipart_upload(
         return Err(ApiError::bad_request("filename is too long"));
     }
 
-    let display_name = payload
-        .display_name
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or(filename)
-        .to_string();
+    let display_name = upload_display_name(filename, payload.display_name.as_deref());
     let safe_key = generate_storage_name(filename);
     let key = build_key(&user_base_path(user_id), "", None, None, &safe_key);
     let content_type = payload
@@ -414,11 +403,40 @@ async fn load_legacy_auth(key: &str) -> AppResult<Option<String>> {
 
 async fn resolve_display_name(user_id: &str, key: &str) -> AppResult<String> {
     let meta = load_meta(user_id, key).await?;
-    Ok(meta
+    let display_name = meta
         .map(|item| item.display_name)
         .filter(|value| !value.is_empty())
         .or_else(|| decode_display_name(key))
-        .unwrap_or_else(|| key.to_string()))
+        .unwrap_or_else(|| key.to_string());
+    Ok(ensure_display_extension(&display_name, key))
+}
+
+fn upload_display_name(filename: &str, display_name: Option<&str>) -> String {
+    let candidate = display_name
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(filename);
+    ensure_display_extension(candidate, filename)
+}
+
+fn ensure_display_extension(display_name: &str, source_name: &str) -> String {
+    let Some(ext) = file_extension(source_name) else {
+        return display_name.to_string();
+    };
+    if display_name.to_lowercase().ends_with(&ext.to_lowercase()) {
+        display_name.to_string()
+    } else {
+        format!("{display_name}{ext}")
+    }
+}
+
+fn file_extension(filename: &str) -> Option<&str> {
+    let name = filename.rsplit('/').next().unwrap_or(filename);
+    let dot_idx = name.rfind('.')?;
+    if dot_idx == 0 || dot_idx + 1 >= name.len() {
+        return None;
+    }
+    Some(&name[dot_idx..])
 }
 
 fn validate_key(key: &str) -> AppResult<String> {
@@ -555,7 +573,9 @@ fn now_ts() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{hash_auth_key, sanitize_name, validate_key};
+    use super::{
+        ensure_display_extension, hash_auth_key, sanitize_name, upload_display_name, validate_key,
+    };
 
     #[test]
     fn rejects_nested_keys() {
@@ -571,5 +591,50 @@ mod tests {
     #[test]
     fn sanitizes_names() {
         assert_eq!(sanitize_name("my file"), "my-file");
+    }
+
+    #[test]
+    fn appends_original_extension_to_custom_upload_name() {
+        assert_eq!(
+            upload_display_name("original.pdf", Some("보고서")),
+            "보고서.pdf"
+        );
+    }
+
+    #[test]
+    fn keeps_custom_upload_name_when_it_already_has_extension() {
+        assert_eq!(
+            upload_display_name("original.pdf", Some("보고서.final.pdf")),
+            "보고서.final.pdf"
+        );
+    }
+
+    #[test]
+    fn appends_original_extension_to_custom_name_with_other_dots() {
+        assert_eq!(
+            upload_display_name("original.pdf", Some("보고서.v1")),
+            "보고서.v1.pdf"
+        );
+    }
+
+    #[test]
+    fn keeps_original_name_when_custom_upload_name_is_empty() {
+        assert_eq!(upload_display_name("photo.png", Some("  ")), "photo.png");
+    }
+
+    #[test]
+    fn keeps_extensionless_files_extensionless() {
+        assert_eq!(
+            upload_display_name("LICENSE", Some("license-copy")),
+            "license-copy"
+        );
+    }
+
+    #[test]
+    fn restores_extension_for_existing_extensionless_display_names() {
+        assert_eq!(
+            ensure_display_extension("보고서", "uuid-original.pdf"),
+            "보고서.pdf"
+        );
     }
 }
