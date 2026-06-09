@@ -1,5 +1,6 @@
 use crate::config::get_config;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
+use serde_json::Value;
 use std::env;
 use std::fs;
 use std::sync::OnceLock;
@@ -18,19 +19,6 @@ struct InteractionRequest {
 pub struct InteractionReply {
     pub reply: String,
     pub interaction_id: String,
-}
-
-#[derive(Deserialize, Debug)]
-struct InteractionResponse {
-    id: Option<String>,
-    outputs: Option<Vec<InteractionOutput>>,
-}
-
-#[derive(Deserialize, Debug)]
-struct InteractionOutput {
-    #[serde(rename = "type")]
-    output_type: Option<String>,
-    text: Option<String>,
 }
 
 fn init_credentials() {
@@ -106,17 +94,22 @@ pub async fn create_interaction(
         return Err(format!("API Error {}: {}", status, text));
     }
 
-    let interaction_res: InteractionResponse = res
+    let interaction_res: Value = res
         .json()
         .await
         .map_err(|e| format!("Failed to parse response: {}", e))?;
 
     let interaction_id = interaction_res
-        .id
-        .clone()
+        .get("id")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
         .ok_or_else(|| "Interaction response did not include an id".to_string())?;
-    let reply =
-        extract_text(&interaction_res).unwrap_or_else(|| "No response generated".to_string());
+    let reply = extract_text(&interaction_res).ok_or_else(|| {
+        format!(
+            "Interaction response did not include text output: {}",
+            summarize_response(&interaction_res)
+        )
+    })?;
 
     Ok(InteractionReply {
         reply,
@@ -124,56 +117,119 @@ pub async fn create_interaction(
     })
 }
 
-fn extract_text(response: &InteractionResponse) -> Option<String> {
+fn extract_text(response: &Value) -> Option<String> {
     response
-        .outputs
-        .as_ref()
-        .and_then(|outputs| {
+        .get("outputs")
+        .and_then(Value::as_array)
+        .and_then(|outputs| outputs.iter().rev().find_map(extract_text_from_output))
+}
+
+fn extract_text_from_output(output: &Value) -> Option<String> {
+    let output_type = output
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("text")
+        .to_ascii_lowercase();
+
+    if output_type == "text" {
+        if let Some(text) = output.get("text").and_then(Value::as_str) {
+            if !text.trim().is_empty() {
+                return Some(text.to_string());
+            }
+        }
+    }
+
+    output
+        .get("content")
+        .and_then(Value::as_array)
+        .and_then(|content| content.iter().rev().find_map(extract_text_from_output))
+}
+
+fn summarize_response(response: &Value) -> String {
+    let status = response
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let output_types = response
+        .get("outputs")
+        .and_then(Value::as_array)
+        .map(|outputs| {
             outputs
                 .iter()
-                .rev()
-                .find(|output| output.output_type.as_deref().unwrap_or("text") == "text")
+                .filter_map(|output| output.get("type").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join(",")
         })
-        .and_then(|output| output.text.clone())
+        .filter(|types| !types.is_empty())
+        .unwrap_or_else(|| "none".to_string());
+
+    format!("status={status}, output_types={output_types}")
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_text, InteractionOutput, InteractionResponse};
+    use super::{extract_text, summarize_response};
+    use serde_json::json;
 
     #[test]
     fn extracts_text_from_response() {
-        let response = InteractionResponse {
-            id: Some("interaction-1".to_string()),
-            outputs: Some(vec![InteractionOutput {
-                output_type: Some("text".to_string()),
-                text: Some("hello".to_string()),
-            }]),
-        };
+        let response = json!({
+            "id": "interaction-1",
+            "outputs": [{ "type": "text", "text": "hello" }]
+        });
 
         assert_eq!(extract_text(&response).as_deref(), Some("hello"));
     }
 
     #[test]
     fn extracts_last_text_output() {
-        let response = InteractionResponse {
-            id: Some("interaction-1".to_string()),
-            outputs: Some(vec![
-                InteractionOutput {
-                    output_type: Some("text".to_string()),
-                    text: Some("first".to_string()),
-                },
-                InteractionOutput {
-                    output_type: Some("image".to_string()),
-                    text: None,
-                },
-                InteractionOutput {
-                    output_type: Some("text".to_string()),
-                    text: Some("last".to_string()),
-                },
-            ]),
-        };
+        let response = json!({
+            "id": "interaction-1",
+            "outputs": [
+                { "type": "text", "text": "first" },
+                { "type": "image" },
+                { "type": "text", "text": "last" }
+            ]
+        });
 
         assert_eq!(extract_text(&response).as_deref(), Some("last"));
+    }
+
+    #[test]
+    fn extracts_uppercase_text_output() {
+        let response = json!({
+            "id": "interaction-1",
+            "outputs": [{ "type": "TEXT", "text": "hello" }]
+        });
+
+        assert_eq!(extract_text(&response).as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn extracts_nested_content_text_output() {
+        let response = json!({
+            "id": "interaction-1",
+            "outputs": [
+                {
+                    "type": "message",
+                    "content": [{ "type": "text", "text": "nested" }]
+                }
+            ]
+        });
+
+        assert_eq!(extract_text(&response).as_deref(), Some("nested"));
+    }
+
+    #[test]
+    fn summarizes_response_without_text() {
+        let response = json!({
+            "status": "completed",
+            "outputs": [{ "type": "function_call" }]
+        });
+
+        assert_eq!(
+            summarize_response(&response),
+            "status=completed, output_types=function_call"
+        );
     }
 }
