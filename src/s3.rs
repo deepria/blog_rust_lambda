@@ -19,7 +19,7 @@ async fn s3_client() -> &'static Client {
         })
         .await
 }
-
+//
 pub async fn list_objects(
     prefix: String,
 ) -> Result<(Vec<String>, Vec<String>), Box<dyn std::error::Error + Send + Sync>> {
