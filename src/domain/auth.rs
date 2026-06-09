@@ -1,7 +1,8 @@
 use crate::api::{ApiError, AppResult};
 use crate::config::get_config;
 use crate::dynamodb::{
-    delete_value, get_json, get_value, put_json, put_json_if_absent, put_value_if_absent,
+    delete_value, get_json, get_value, put_json, put_json_if_absent, put_json_with_ttl,
+    put_value_if_absent,
 };
 use chrono::{DateTime, Duration, Utc};
 use lambda_http::Request;
@@ -335,7 +336,7 @@ pub async fn require_user(req: &Request) -> AppResult<User> {
         return Err(ApiError::unauthorized("session expired"));
     }
     session.last_used_at = now_iso();
-    put_json(SESSION_PART, &hash, &session)
+    put_session_access(&session)
         .await
         .map_err(ApiError::internal)?;
     let user = load_user(&session.user_id).await?;
@@ -355,10 +356,10 @@ pub async fn refresh_session(req: &Request) -> AppResult<(AuthSession, CookieBun
         return Err(ApiError::unauthorized("refresh token expired"));
     }
     session.revoked_at = Some(now_iso());
-    put_json(SESSION_PART, &hash, &session)
+    put_revoked_session(&hash, &session)
         .await
         .map_err(ApiError::internal)?;
-    put_json(SESSION_PART, &session.session_token, &session)
+    put_revoked_session(&session.session_token, &session)
         .await
         .map_err(ApiError::internal)?;
     let user = load_user(&session.user_id).await?;
@@ -376,13 +377,13 @@ pub async fn logout(req: &Request) -> AppResult<()> {
                 .map_err(ApiError::internal)?
             {
                 session.revoked_at = Some(now_iso());
-                put_json(SESSION_PART, &hash_token(&token), &session)
+                put_revoked_session(&hash_token(&token), &session)
                     .await
                     .map_err(ApiError::internal)?;
-                put_json(SESSION_PART, &session.session_token, &session)
+                put_revoked_session(&session.session_token, &session)
                     .await
                     .map_err(ApiError::internal)?;
-                put_json(SESSION_PART, &session.refresh_token, &session)
+                put_revoked_session(&session.refresh_token, &session)
                     .await
                     .map_err(ApiError::internal)?;
             }
@@ -593,16 +594,47 @@ async fn create_session(req: &Request, user_id: &str) -> AppResult<CookieBundle>
         created_at: now.to_rfc3339(),
         revoked_at: None,
     };
-    put_json(SESSION_PART, &base.session_token, &base)
+    put_session_access(&base)
         .await
         .map_err(ApiError::internal)?;
-    put_json(SESSION_PART, &base.refresh_token, &base)
+    put_session_refresh(&base)
         .await
         .map_err(ApiError::internal)?;
     Ok(CookieBundle {
         session_token,
         refresh_token,
     })
+}
+
+async fn put_session_access(
+    session: &Session,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    put_json_with_ttl(
+        SESSION_PART,
+        &session.session_token,
+        session,
+        ttl_epoch(&session.expires_at)?,
+    )
+    .await
+}
+
+async fn put_session_refresh(
+    session: &Session,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    put_json_with_ttl(
+        SESSION_PART,
+        &session.refresh_token,
+        session,
+        ttl_epoch(&session.refresh_expires_at)?,
+    )
+    .await
+}
+
+async fn put_revoked_session(
+    idx: &str,
+    session: &Session,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    put_json_with_ttl(SESSION_PART, idx, session, Utc::now().timestamp()).await
 }
 
 async fn create_mobile_login_code(req: &Request, user_id: &str) -> AppResult<String> {
@@ -912,6 +944,10 @@ fn parse_time(value: &str) -> AppResult<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(value)
         .map(|dt| dt.with_timezone(&Utc))
         .map_err(|_| ApiError::internal("invalid session timestamp"))
+}
+
+fn ttl_epoch(value: &str) -> Result<i64, Box<dyn std::error::Error + Send + Sync>> {
+    Ok(DateTime::parse_from_rfc3339(value)?.timestamp())
 }
 
 fn now_iso() -> String {

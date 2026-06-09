@@ -59,12 +59,24 @@ pub async fn put_value(
     idx: &str,
     value: String,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    put_value_with_ttl(part, idx, value, None).await
+}
+
+pub async fn put_value_with_ttl(
+    part: &str,
+    idx: &str,
+    value: String,
+    ttl: Option<i64>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let client = dynamodb_client().await;
 
     let mut item = HashMap::new();
     item.insert("part".to_string(), AttributeValue::S(part.to_string()));
     item.insert("idx".to_string(), AttributeValue::S(idx.to_string()));
     item.insert("value".to_string(), AttributeValue::S(value));
+    if let Some(ttl) = ttl {
+        item.insert("ttl".to_string(), AttributeValue::N(ttl.to_string()));
+    }
 
     client
         .put_item()
@@ -125,6 +137,15 @@ pub async fn put_json<T: serde::Serialize>(
     value: &T,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     put_value(part, idx, serde_json::to_string(value)?).await
+}
+
+pub async fn put_json_with_ttl<T: serde::Serialize>(
+    part: &str,
+    idx: &str,
+    value: &T,
+    ttl: i64,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    put_value_with_ttl(part, idx, serde_json::to_string(value)?, Some(ttl)).await
 }
 
 pub async fn delete_value(
