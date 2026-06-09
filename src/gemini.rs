@@ -11,6 +11,7 @@ static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 struct InteractionRequest {
     model: String,
     input: String,
+    response_modalities: Vec<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     previous_interaction_id: Option<String>,
 }
@@ -67,6 +68,7 @@ pub async fn create_interaction(
     let request_body = InteractionRequest {
         model: get_config().gemini_model.clone(),
         input: input.to_string(),
+        response_modalities: vec!["text"],
         previous_interaction_id: previous_interaction_id.map(ToOwned::to_owned),
     };
 
