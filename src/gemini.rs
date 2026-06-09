@@ -11,7 +11,6 @@ static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 struct InteractionRequest {
     model: String,
     input: String,
-    response_modalities: Vec<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     previous_interaction_id: Option<String>,
 }
@@ -68,7 +67,6 @@ pub async fn create_interaction(
     let request_body = InteractionRequest {
         model: get_config().gemini_model.clone(),
         input: input.to_string(),
-        response_modalities: vec!["text"],
         previous_interaction_id: previous_interaction_id.map(ToOwned::to_owned),
     };
 
@@ -76,6 +74,7 @@ pub async fn create_interaction(
     let mut request = client
         .post(url)
         .bearer_auth(token.as_str())
+        .header("Api-Revision", "2026-05-20")
         .json(&request_body);
 
     if let Some(project_id) = &get_config().google_project_id {
@@ -120,31 +119,59 @@ pub async fn create_interaction(
 }
 
 fn extract_text(response: &Value) -> Option<String> {
+    extract_text_from_steps(response).or_else(|| extract_text_from_outputs(response))
+}
+
+fn extract_text_from_steps(response: &Value) -> Option<String> {
+    response
+        .get("steps")
+        .and_then(Value::as_array)
+        .and_then(|steps| steps.iter().rev().find_map(extract_text_from_step))
+}
+
+fn extract_text_from_step(step: &Value) -> Option<String> {
+    let step_type = step
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
+    if step_type == "model_output" {
+        return step
+            .get("content")
+            .and_then(Value::as_array)
+            .and_then(|content| content.iter().rev().find_map(extract_text_from_content));
+    }
+
+    None
+}
+
+fn extract_text_from_outputs(response: &Value) -> Option<String> {
     response
         .get("outputs")
         .and_then(Value::as_array)
-        .and_then(|outputs| outputs.iter().rev().find_map(extract_text_from_output))
+        .and_then(|outputs| outputs.iter().rev().find_map(extract_text_from_content))
 }
 
-fn extract_text_from_output(output: &Value) -> Option<String> {
-    let output_type = output
+fn extract_text_from_content(content: &Value) -> Option<String> {
+    let content_type = content
         .get("type")
         .and_then(Value::as_str)
         .unwrap_or("text")
         .to_ascii_lowercase();
 
-    if output_type == "text" {
-        if let Some(text) = output.get("text").and_then(Value::as_str) {
+    if content_type == "text" {
+        if let Some(text) = content.get("text").and_then(Value::as_str) {
             if !text.trim().is_empty() {
                 return Some(text.to_string());
             }
         }
     }
 
-    output
+    content
         .get("content")
         .and_then(Value::as_array)
-        .and_then(|content| content.iter().rev().find_map(extract_text_from_output))
+        .and_then(|content| content.iter().rev().find_map(extract_text_from_content))
 }
 
 fn summarize_response(response: &Value) -> String {
@@ -164,8 +191,20 @@ fn summarize_response(response: &Value) -> String {
         })
         .filter(|types| !types.is_empty())
         .unwrap_or_else(|| "none".to_string());
+    let step_types = response
+        .get("steps")
+        .and_then(Value::as_array)
+        .map(|steps| {
+            steps
+                .iter()
+                .filter_map(|step| step.get("type").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join(",")
+        })
+        .filter(|types| !types.is_empty())
+        .unwrap_or_else(|| "none".to_string());
 
-    format!("status={status}, output_types={output_types}")
+    format!("status={status}, output_types={output_types}, step_types={step_types}")
 }
 
 #[cfg(test)]
@@ -177,7 +216,12 @@ mod tests {
     fn extracts_text_from_response() {
         let response = json!({
             "id": "interaction-1",
-            "outputs": [{ "type": "text", "text": "hello" }]
+            "steps": [
+                {
+                    "type": "model_output",
+                    "content": [{ "type": "text", "text": "hello" }]
+                }
+            ]
         });
 
         assert_eq!(extract_text(&response).as_deref(), Some("hello"));
@@ -187,10 +231,16 @@ mod tests {
     fn extracts_last_text_output() {
         let response = json!({
             "id": "interaction-1",
-            "outputs": [
-                { "type": "text", "text": "first" },
-                { "type": "image" },
-                { "type": "text", "text": "last" }
+            "steps": [
+                {
+                    "type": "model_output",
+                    "content": [{ "type": "text", "text": "first" }]
+                },
+                { "type": "function_call" },
+                {
+                    "type": "model_output",
+                    "content": [{ "type": "text", "text": "last" }]
+                }
             ]
         });
 
@@ -201,7 +251,12 @@ mod tests {
     fn extracts_uppercase_text_output() {
         let response = json!({
             "id": "interaction-1",
-            "outputs": [{ "type": "TEXT", "text": "hello" }]
+            "steps": [
+                {
+                    "type": "model_output",
+                    "content": [{ "type": "TEXT", "text": "hello" }]
+                }
+            ]
         });
 
         assert_eq!(extract_text(&response).as_deref(), Some("hello"));
@@ -211,9 +266,9 @@ mod tests {
     fn extracts_nested_content_text_output() {
         let response = json!({
             "id": "interaction-1",
-            "outputs": [
+            "steps": [
                 {
-                    "type": "message",
+                    "type": "model_output",
                     "content": [{ "type": "text", "text": "nested" }]
                 }
             ]
@@ -223,15 +278,25 @@ mod tests {
     }
 
     #[test]
+    fn falls_back_to_legacy_outputs() {
+        let response = json!({
+            "id": "interaction-1",
+            "outputs": [{ "type": "text", "text": "legacy" }]
+        });
+
+        assert_eq!(extract_text(&response).as_deref(), Some("legacy"));
+    }
+
+    #[test]
     fn summarizes_response_without_text() {
         let response = json!({
             "status": "completed",
-            "outputs": [{ "type": "function_call" }]
+            "steps": [{ "type": "function_call" }]
         });
 
         assert_eq!(
             summarize_response(&response),
-            "status=completed, output_types=function_call"
+            "status=completed, output_types=none, step_types=function_call"
         );
     }
 }
