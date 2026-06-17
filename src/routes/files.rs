@@ -1,8 +1,8 @@
 use crate::api::{self, ApiError};
 use crate::domain::auth;
 use crate::domain::files::{
-    self, AbortMultipartRequest, AccessRequest, CompleteMultipartRequest, MultipartPartRequest,
-    UploadRequest,
+    self, AbortMultipartRequest, AccessRequest, CompleteMultipartRequest, FileOrganization,
+    MultipartPartRequest, UploadRequest,
 };
 use lambda_http::http::StatusCode;
 use lambda_http::{Body, Error, Request, Response};
@@ -34,6 +34,31 @@ pub async fn handle_presign_upload(req: Request) -> Result<Response<Body>, Error
     match files::create_upload(&user.id, payload).await {
         Ok(data) => api::ok(&req, data),
         Err(error) => api::map_error(&req, StatusCode::BAD_REQUEST, error),
+    }
+}
+
+pub async fn handle_organization(req: Request) -> Result<Response<Body>, Error> {
+    let user = match auth::require_user(&req).await {
+        Ok(user) => user,
+        Err(error) => return crate::routes::auth::map_auth_error(&req, error),
+    };
+    match *req.method() {
+        lambda_http::http::Method::GET => match files::get_organization(&user.id).await {
+            Ok(data) => api::ok(&req, data),
+            Err(error) => api::map_error(&req, StatusCode::INTERNAL_SERVER_ERROR, error),
+        },
+        lambda_http::http::Method::PUT => {
+            let payload = parse_json_body::<FileOrganization>(&req)?;
+            match files::save_organization(&user.id, payload).await {
+                Ok(data) => api::ok(&req, data),
+                Err(error) => api::map_error(&req, StatusCode::BAD_REQUEST, error),
+            }
+        }
+        _ => api::map_error(
+            &req,
+            StatusCode::METHOD_NOT_ALLOWED,
+            ApiError::bad_request("method not allowed"),
+        ),
     }
 }
 

@@ -11,11 +11,15 @@ use base64::Engine;
 use flate2::read::ZlibDecoder;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use uuid::Uuid;
 
 const FILE_META_PART: &str = "FILE_META";
+const FILE_ORG_PART: &str = "FILE_ORG";
 const LEGACY_FILE_AUTH_PART: &str = "file";
+const MAX_DIRECTORIES: usize = 200;
+const MAX_DIRECTORY_NAME_LEN: usize = 80;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileItem {
@@ -32,6 +36,22 @@ struct FileMeta {
     pub auth_hash: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileDirectory {
+    pub id: String,
+    pub name: String,
+    pub parent_id: Option<String>,
+    pub sort_order: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct FileOrganization {
+    #[serde(default)]
+    pub directories: Vec<FileDirectory>,
+    #[serde(default)]
+    pub file_locations: HashMap<String, Option<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -142,6 +162,21 @@ pub async fn list_files(user_id: &str) -> AppResult<Vec<FileItem>> {
             .cmp(&b.display_name.to_lowercase())
     });
     Ok(items)
+}
+
+pub async fn get_organization(user_id: &str) -> AppResult<FileOrganization> {
+    load_organization(user_id).await
+}
+
+pub async fn save_organization(
+    user_id: &str,
+    organization: FileOrganization,
+) -> AppResult<FileOrganization> {
+    let organization = normalize_organization(organization)?;
+    put_json(FILE_ORG_PART, &file_org_idx(user_id), &organization)
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(organization)
 }
 
 pub async fn create_upload(user_id: &str, payload: UploadRequest) -> AppResult<UploadResponse> {
@@ -342,6 +377,7 @@ pub async fn create_delete(user_id: &str, payload: AccessRequest) -> AppResult<P
     delete_value(LEGACY_FILE_AUTH_PART, &legacy_auth_index(&key))
         .await
         .map_err(ApiError::internal)?;
+    remove_file_from_organization(user_id, &key).await?;
     Ok(PresignedResponse { url })
 }
 
@@ -357,7 +393,74 @@ pub async fn delete_file(user_id: &str, key: &str, auth_key: Option<&str>) -> Ap
     delete_value(LEGACY_FILE_AUTH_PART, &legacy_auth_index(&key))
         .await
         .map_err(ApiError::internal)?;
+    remove_file_from_organization(user_id, &key).await?;
     Ok(())
+}
+
+async fn load_organization(user_id: &str) -> AppResult<FileOrganization> {
+    get_json(FILE_ORG_PART, &file_org_idx(user_id))
+        .await
+        .map_err(ApiError::internal)
+        .map(|value| value.unwrap_or_default())
+}
+
+async fn remove_file_from_organization(user_id: &str, key: &str) -> AppResult<()> {
+    let mut organization = load_organization(user_id).await?;
+    if organization.file_locations.remove(key).is_some() {
+        save_organization(user_id, organization).await?;
+    }
+    Ok(())
+}
+
+fn normalize_organization(mut organization: FileOrganization) -> AppResult<FileOrganization> {
+    if organization.directories.len() > MAX_DIRECTORIES {
+        return Err(ApiError::bad_request("too many directories"));
+    }
+
+    let mut ids = HashSet::new();
+    for directory in &mut organization.directories {
+        directory.id = directory.id.trim().to_string();
+        directory.name = directory.name.trim().to_string();
+        directory.parent_id = directory
+            .parent_id
+            .as_ref()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+
+        if directory.id.is_empty() || directory.id.len() > 80 {
+            return Err(ApiError::bad_request("invalid directory id"));
+        }
+        if !directory
+            .id
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+        {
+            return Err(ApiError::bad_request("invalid directory id"));
+        }
+        if directory.name.is_empty() {
+            return Err(ApiError::bad_request("directory name is required"));
+        }
+        if directory.name.chars().count() > MAX_DIRECTORY_NAME_LEN {
+            return Err(ApiError::bad_request("directory name is too long"));
+        }
+        if !ids.insert(directory.id.clone()) {
+            return Err(ApiError::bad_request("duplicate directory id"));
+        }
+    }
+
+    for directory in &organization.directories {
+        if let Some(parent_id) = &directory.parent_id {
+            if parent_id == &directory.id || !ids.contains(parent_id) {
+                return Err(ApiError::bad_request("invalid parent directory"));
+            }
+        }
+    }
+
+    organization.file_locations.retain(|key, directory_id| {
+        validate_key(key).is_ok() && directory_id.as_ref().map_or(true, |id| ids.contains(id))
+    });
+
+    Ok(organization)
 }
 
 async fn assert_file_access(user_id: &str, key: &str, auth_key: Option<&str>) -> AppResult<()> {
@@ -478,6 +581,10 @@ fn user_base_path(user_id: &str) -> String {
 
 fn file_meta_idx(user_id: &str, key: &str) -> String {
     format!("user:{user_id}:file:{key}")
+}
+
+fn file_org_idx(user_id: &str) -> String {
+    format!("user:{user_id}:organization")
 }
 
 fn generate_storage_name(filename: &str) -> String {

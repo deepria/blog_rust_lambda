@@ -26,6 +26,7 @@ pub async fn function_handler(req: Request) -> Result<Response<Body>, Error> {
         "/api/todo-meta" => routes::todos::handle_meta(req).await,
         "/api/memos" => routes::memos::handle_collection(req).await,
         "/api/files" => routes::files::handle_collection(req).await,
+        "/api/files/organization" => routes::files::handle_organization(req).await,
         "/api/files/presign-upload" if req.method() == "POST" => {
             routes::files::handle_presign_upload(req).await
         }
