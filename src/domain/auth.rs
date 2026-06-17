@@ -967,9 +967,14 @@ fn redirect_uri(provider: &AuthProvider) -> String {
 }
 
 fn sanitize_return_to(value: Option<String>) -> String {
-    let default = get_config().auth_frontend_url.clone();
+    let cfg = get_config();
+    let default = cfg.auth_frontend_url.clone();
     value
-        .filter(|candidate| candidate.starts_with(&get_config().auth_frontend_url))
+        .filter(|candidate| {
+            cfg.auth_allowed_frontend_urls
+                .iter()
+                .any(|allowed| candidate == allowed || candidate.starts_with(&format!("{allowed}/")))
+        })
         .unwrap_or(default)
 }
 
@@ -1005,7 +1010,8 @@ fn oauth_state_cookie(value: &str) -> String {
 
 fn auth_cookie(name: &str, value: &str, max_age: i64) -> String {
     format!(
-        "{name}={value}; Path=/; Max-Age={max_age}; HttpOnly; SameSite=Lax{}",
+        "{name}={value}; Path=/; Max-Age={max_age}; HttpOnly; SameSite={}{}",
+        get_config().auth_cookie_same_site,
         secure_suffix()
     )
 }

@@ -10,8 +10,10 @@ pub struct EnvConfig {
     pub gemini_model: String,
     pub auth_base_url: String,
     pub auth_frontend_url: String,
+    pub auth_allowed_frontend_urls: Vec<String>,
     pub auth_mobile_deep_link: String,
     pub auth_cookie_secure: bool,
+    pub auth_cookie_same_site: String,
     pub auth_allowlist_enabled: bool,
     pub google_oauth_client_id: Option<String>,
     pub google_oauth_client_secret: Option<String>,
@@ -35,6 +37,18 @@ impl EnvConfig {
             .map(ToOwned::to_owned)
             .collect::<Vec<_>>();
 
+        let auth_frontend_url = std::env::var("AUTH_FRONTEND_URL")
+            .or_else(|_| std::env::var("FRONTEND_URL"))
+            .unwrap_or_else(|_| "http://localhost:5173".to_string())
+            .trim_end_matches('/')
+            .to_string();
+
+        let auth_allowed_frontend_urls = std::env::var("AUTH_ALLOWED_FRONTEND_URLS")
+            .ok()
+            .map(|value| parse_url_list(&value))
+            .filter(|values| !values.is_empty())
+            .unwrap_or_else(|| vec![auth_frontend_url.clone()]);
+
         Self {
             dynamodb_table: std::env::var("DYNAMODB_TABLE")
                 .unwrap_or_else(|_| "blog_deepria_master".to_string()),
@@ -50,16 +64,17 @@ impl EnvConfig {
                 .unwrap_or_else(|_| "http://localhost:8080".to_string())
                 .trim_end_matches('/')
                 .to_string(),
-            auth_frontend_url: std::env::var("AUTH_FRONTEND_URL")
-                .or_else(|_| std::env::var("FRONTEND_URL"))
-                .unwrap_or_else(|_| "http://localhost:5173".to_string())
-                .trim_end_matches('/')
-                .to_string(),
+            auth_frontend_url,
+            auth_allowed_frontend_urls,
             auth_mobile_deep_link: std::env::var("AUTH_MOBILE_DEEP_LINK")
                 .unwrap_or_else(|_| "deepria://auth/callback".to_string())
                 .trim_end_matches('?')
                 .to_string(),
             auth_cookie_secure: env_bool("AUTH_COOKIE_SECURE", true),
+            auth_cookie_same_site: std::env::var("AUTH_COOKIE_SAMESITE")
+                .ok()
+                .and_then(|value| normalize_same_site(&value))
+                .unwrap_or_else(|| "Lax".to_string()),
             auth_allowlist_enabled: env_bool("AUTH_ALLOWLIST_ENABLED", false),
             google_oauth_client_id: std::env::var("GOOGLE_OAUTH_CLIENT_ID").ok(),
             google_oauth_client_secret: std::env::var("GOOGLE_OAUTH_CLIENT_SECRET").ok(),
@@ -86,6 +101,24 @@ impl EnvConfig {
     }
 }
 
+fn parse_url_list(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.trim_end_matches('/').to_string())
+        .collect()
+}
+
+fn normalize_same_site(value: &str) -> Option<String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "lax" => Some("Lax".to_string()),
+        "strict" => Some("Strict".to_string()),
+        "none" => Some("None".to_string()),
+        _ => None,
+    }
+}
+
 fn normalize_base_path(value: &str) -> String {
     value.trim().trim_matches('/').to_string()
 }
@@ -104,12 +137,27 @@ fn env_bool(name: &str, default: bool) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_base_path;
+    use super::{normalize_base_path, normalize_same_site, parse_url_list};
 
     #[test]
     fn normalizes_base_path() {
         assert_eq!(normalize_base_path("/upload/"), "upload");
         assert_eq!(normalize_base_path("upload"), "upload");
         assert_eq!(normalize_base_path("nested/path/"), "nested/path");
+    }
+
+    #[test]
+    fn parses_url_list() {
+        assert_eq!(
+            parse_url_list("https://deepria.cloud/, http://localhost:5173 "),
+            vec!["https://deepria.cloud", "http://localhost:5173"]
+        );
+    }
+
+    #[test]
+    fn normalizes_same_site() {
+        assert_eq!(normalize_same_site("none").as_deref(), Some("None"));
+        assert_eq!(normalize_same_site("LAX").as_deref(), Some("Lax"));
+        assert_eq!(normalize_same_site("invalid"), None);
     }
 }
