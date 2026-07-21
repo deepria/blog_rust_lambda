@@ -1,8 +1,7 @@
 use crate::api::{ApiError, AppResult};
 use crate::config::get_config;
 use crate::dynamodb::{
-    delete_value, get_json, get_value, put_json, put_json_if_absent, put_json_with_ttl,
-    put_value_if_absent,
+    delete_value, get_json, get_value, put_json, put_json_if_absent, put_value_if_absent,
 };
 use chrono::{DateTime, Duration, Utc};
 use lambda_http::Request;
@@ -10,6 +9,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use uuid::Uuid;
+
+pub mod cookies;
+mod providers;
+mod sessions;
 
 const USER_PART: &str = "USER";
 const USER_EMAIL_PART: &str = "USER_EMAIL";
@@ -63,10 +66,6 @@ pub enum UserRole {
 impl UserRole {
     fn default_member() -> Self {
         Self::Member
-    }
-
-    pub fn is_any(&self, roles: &[UserRole]) -> bool {
-        roles.iter().any(|role| role == self)
     }
 }
 
@@ -211,7 +210,6 @@ fn oauth_authorize_url_with_mode(
     mobile: bool,
     return_to: Option<String>,
 ) -> AppResult<(String, String)> {
-    ensure_provider_config(&provider)?;
     let state = OAuthState {
         provider: provider.as_str().to_string(),
         nonce: Uuid::new_v4().to_string(),
@@ -222,29 +220,8 @@ fn oauth_authorize_url_with_mode(
     };
     let state_cookie = encode_state(&state)?;
     let redirect_uri = redirect_uri(&provider);
-    let url = match provider {
-        AuthProvider::Google => {
-            let client_id = get_config().google_oauth_client_id.as_deref().unwrap();
-            format!(
-                "https://accounts.google.com/o/oauth2/v2/auth?client_id={}&redirect_uri={}&response_type=code&scope={}&state={}&access_type=offline&prompt=select_account",
-                url_encode(client_id),
-                url_encode(&redirect_uri),
-                url_encode("openid email profile"),
-                url_encode(&state.nonce),
-            )
-        }
-        AuthProvider::Github => {
-            let client_id = get_config().github_oauth_client_id.as_deref().unwrap();
-            format!(
-                "https://github.com/login/oauth/authorize?client_id={}&redirect_uri={}&scope={}&state={}",
-                url_encode(client_id),
-                url_encode(&redirect_uri),
-                url_encode("read:user user:email"),
-                url_encode(&state.nonce),
-            )
-        }
-    };
-    Ok((url, oauth_state_cookie(&state_cookie)))
+    let url = providers::authorization_url(&provider, &state.nonce, &redirect_uri)?;
+    Ok((url, cookies::oauth_state_cookie(&state_cookie)))
 }
 
 pub async fn handle_oauth_callback(
@@ -274,7 +251,9 @@ pub async fn handle_oauth_callback(
             redirect_to: mobile_deep_link(&code),
         });
     }
-    let bundle = create_session(req, &user.id).await?;
+    let bundle = sessions::create(req, &user.id)
+        .await
+        .map_err(ApiError::internal)?;
     Ok(OAuthCallbackResult::Web {
         bundle,
         return_to: state.return_to,
@@ -314,7 +293,9 @@ pub async fn complete_mobile_login(
 
     let user = load_user(&login_code.user_id).await?;
     assert_active_user(&user)?;
-    let bundle = create_session(req, &user.id).await?;
+    let bundle = sessions::create(req, &user.id)
+        .await
+        .map_err(ApiError::internal)?;
     let auth = build_auth_session(&user).await?;
     Ok((auth, bundle))
 }
@@ -325,8 +306,8 @@ pub async fn current_session(req: &Request) -> AppResult<AuthSession> {
 }
 
 pub async fn require_user(req: &Request) -> AppResult<User> {
-    let token =
-        cookie_value(req, ACCESS_COOKIE).ok_or_else(|| ApiError::unauthorized("login required"))?;
+    let token = cookies::cookie_value(req, ACCESS_COOKIE)
+        .ok_or_else(|| ApiError::unauthorized("login required"))?;
     let hash = hash_token(&token);
     let mut session: Session = get_json(SESSION_PART, &hash)
         .await
@@ -336,7 +317,7 @@ pub async fn require_user(req: &Request) -> AppResult<User> {
         return Err(ApiError::unauthorized("session expired"));
     }
     session.last_used_at = now_iso();
-    put_session_access(&session)
+    sessions::put_access(&session)
         .await
         .map_err(ApiError::internal)?;
     let user = load_user(&session.user_id).await?;
@@ -345,7 +326,7 @@ pub async fn require_user(req: &Request) -> AppResult<User> {
 }
 
 pub async fn refresh_session(req: &Request) -> AppResult<(AuthSession, CookieBundle)> {
-    let token = cookie_value(req, REFRESH_COOKIE)
+    let token = cookies::cookie_value(req, REFRESH_COOKIE)
         .ok_or_else(|| ApiError::unauthorized("refresh token missing"))?;
     let hash = hash_token(&token);
     let mut session: Session = get_json(SESSION_PART, &hash)
@@ -356,34 +337,36 @@ pub async fn refresh_session(req: &Request) -> AppResult<(AuthSession, CookieBun
         return Err(ApiError::unauthorized("refresh token expired"));
     }
     session.revoked_at = Some(now_iso());
-    put_revoked_session(&hash, &session)
+    sessions::revoke(&hash, &session)
         .await
         .map_err(ApiError::internal)?;
-    put_revoked_session(&session.session_token, &session)
+    sessions::revoke(&session.session_token, &session)
         .await
         .map_err(ApiError::internal)?;
     let user = load_user(&session.user_id).await?;
     assert_active_user(&user)?;
-    let bundle = create_session(req, &user.id).await?;
+    let bundle = sessions::create(req, &user.id)
+        .await
+        .map_err(ApiError::internal)?;
     let auth = build_auth_session(&user).await?;
     Ok((auth, bundle))
 }
 
 pub async fn logout(req: &Request) -> AppResult<()> {
     for name in [ACCESS_COOKIE, REFRESH_COOKIE] {
-        if let Some(token) = cookie_value(req, name) {
+        if let Some(token) = cookies::cookie_value(req, name) {
             if let Some(mut session) = get_json::<Session>(SESSION_PART, &hash_token(&token))
                 .await
                 .map_err(ApiError::internal)?
             {
                 session.revoked_at = Some(now_iso());
-                put_revoked_session(&hash_token(&token), &session)
+                sessions::revoke(&hash_token(&token), &session)
                     .await
                     .map_err(ApiError::internal)?;
-                put_revoked_session(&session.session_token, &session)
+                sessions::revoke(&session.session_token, &session)
                     .await
                     .map_err(ApiError::internal)?;
-                put_revoked_session(&session.refresh_token, &session)
+                sessions::revoke(&session.refresh_token, &session)
                     .await
                     .map_err(ApiError::internal)?;
             }
@@ -412,63 +395,6 @@ pub async fn disconnect_provider(user_id: &str, provider: AuthProvider) -> AppRe
         .map_err(ApiError::internal)?;
     let user = load_user(user_id).await?;
     build_auth_session(&user).await
-}
-
-#[allow(dead_code)]
-pub fn require_role(user: &User, roles: &[UserRole]) -> AppResult<()> {
-    if user.role.is_any(roles) {
-        Ok(())
-    } else {
-        Err(ApiError::forbidden("insufficient role"))
-    }
-}
-
-#[allow(dead_code)]
-pub fn require_admin(user: &User) -> AppResult<()> {
-    require_role(user, &[UserRole::Owner, UserRole::Admin])
-}
-
-#[allow(dead_code)]
-pub fn assert_owner(user: &User, resource_user_id: &str) -> AppResult<()> {
-    if user.id == resource_user_id {
-        Ok(())
-    } else {
-        Err(ApiError::forbidden(
-            "resource does not belong to current user",
-        ))
-    }
-}
-
-#[allow(dead_code)]
-pub fn can_access_resource(user: &User, resource_user_id: &str) -> bool {
-    user.id == resource_user_id || matches!(user.role, UserRole::Owner | UserRole::Admin)
-}
-
-pub fn session_cookies(bundle: &CookieBundle) -> Vec<String> {
-    vec![
-        auth_cookie(
-            ACCESS_COOKIE,
-            &bundle.session_token,
-            SESSION_DAYS * 24 * 3600,
-        ),
-        auth_cookie(
-            REFRESH_COOKIE,
-            &bundle.refresh_token,
-            REFRESH_DAYS * 24 * 3600,
-        ),
-    ]
-}
-
-pub fn clear_cookies() -> Vec<String> {
-    [ACCESS_COOKIE, REFRESH_COOKIE, OAUTH_STATE_COOKIE]
-        .iter()
-        .map(|name| {
-            format!(
-                "{name}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax{}",
-                secure_suffix()
-            )
-        })
-        .collect()
 }
 
 async fn login_or_create_user(profile: ProviderProfile) -> AppResult<User> {
@@ -575,66 +501,6 @@ async fn link_provider_to_user(user_id: &str, profile: ProviderProfile) -> AppRe
     .await
     .map_err(ApiError::internal)?;
     load_user(user_id).await
-}
-
-async fn create_session(req: &Request, user_id: &str) -> AppResult<CookieBundle> {
-    let session_token = Uuid::new_v4().to_string();
-    let refresh_token = Uuid::new_v4().to_string();
-    let now = Utc::now();
-    let base = Session {
-        id: Uuid::new_v4().to_string(),
-        user_id: user_id.to_string(),
-        session_token: hash_token(&session_token),
-        refresh_token: hash_token(&refresh_token),
-        expires_at: (now + Duration::days(SESSION_DAYS)).to_rfc3339(),
-        refresh_expires_at: (now + Duration::days(REFRESH_DAYS)).to_rfc3339(),
-        last_used_at: now.to_rfc3339(),
-        ip_address: header(req, "x-forwarded-for").or_else(|| header(req, "x-real-ip")),
-        user_agent: header(req, "user-agent"),
-        created_at: now.to_rfc3339(),
-        revoked_at: None,
-    };
-    put_session_access(&base)
-        .await
-        .map_err(ApiError::internal)?;
-    put_session_refresh(&base)
-        .await
-        .map_err(ApiError::internal)?;
-    Ok(CookieBundle {
-        session_token,
-        refresh_token,
-    })
-}
-
-async fn put_session_access(
-    session: &Session,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    put_json_with_ttl(
-        SESSION_PART,
-        &session.session_token,
-        session,
-        ttl_epoch(&session.expires_at)?,
-    )
-    .await
-}
-
-async fn put_session_refresh(
-    session: &Session,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    put_json_with_ttl(
-        SESSION_PART,
-        &session.refresh_token,
-        session,
-        ttl_epoch(&session.refresh_expires_at)?,
-    )
-    .await
-}
-
-async fn put_revoked_session(
-    idx: &str,
-    session: &Session,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    put_json_with_ttl(SESSION_PART, idx, session, Utc::now().timestamp()).await
 }
 
 async fn create_mobile_login_code(req: &Request, user_id: &str) -> AppResult<String> {
@@ -889,7 +755,7 @@ fn assert_active_user(user: &User) -> AppResult<()> {
 }
 
 fn read_state(req: &Request) -> AppResult<OAuthState> {
-    let raw = cookie_value(req, OAUTH_STATE_COOKIE)
+    let raw = cookies::cookie_value(req, OAUTH_STATE_COOKIE)
         .ok_or_else(|| ApiError::unauthorized("OAuth state cookie missing"))?;
     decode_state(&raw)
 }
@@ -971,9 +837,9 @@ fn sanitize_return_to(value: Option<String>) -> String {
     let default = cfg.auth_frontend_url.clone();
     value
         .filter(|candidate| {
-            cfg.auth_allowed_frontend_urls
-                .iter()
-                .any(|allowed| candidate == allowed || candidate.starts_with(&format!("{allowed}/")))
+            cfg.auth_allowed_frontend_urls.iter().any(|allowed| {
+                candidate == allowed || candidate.starts_with(&format!("{allowed}/"))
+            })
         })
         .unwrap_or(default)
 }
@@ -982,56 +848,6 @@ fn mobile_deep_link(code: &str) -> String {
     let base = &get_config().auth_mobile_deep_link;
     let separator = if base.contains('?') { "&" } else { "?" };
     format!("{base}{separator}code={}", url_encode(code))
-}
-
-fn ensure_provider_config(provider: &AuthProvider) -> AppResult<()> {
-    let cfg = get_config();
-    let ok = match provider {
-        AuthProvider::Google => {
-            cfg.google_oauth_client_id.is_some() && cfg.google_oauth_client_secret.is_some()
-        }
-        AuthProvider::Github => {
-            cfg.github_oauth_client_id.is_some() && cfg.github_oauth_client_secret.is_some()
-        }
-    };
-    if ok {
-        Ok(())
-    } else {
-        Err(ApiError::bad_request(format!(
-            "{} OAuth is not configured",
-            provider.as_str()
-        )))
-    }
-}
-
-fn oauth_state_cookie(value: &str) -> String {
-    auth_cookie(OAUTH_STATE_COOKIE, value, STATE_MINUTES * 60)
-}
-
-fn auth_cookie(name: &str, value: &str, max_age: i64) -> String {
-    format!(
-        "{name}={value}; Path=/; Max-Age={max_age}; HttpOnly; SameSite={}{}",
-        get_config().auth_cookie_same_site,
-        secure_suffix()
-    )
-}
-
-fn secure_suffix() -> &'static str {
-    if get_config().auth_cookie_secure {
-        "; Secure"
-    } else {
-        ""
-    }
-}
-
-fn cookie_value(req: &Request, name: &str) -> Option<String> {
-    req.headers()
-        .get_all("cookie")
-        .iter()
-        .filter_map(|value| value.to_str().ok())
-        .flat_map(|header| header.split(';'))
-        .filter_map(|pair| pair.trim().split_once('='))
-        .find_map(|(key, value)| (key == name).then(|| value.to_string()))
 }
 
 fn header(req: &Request, name: &str) -> Option<String> {

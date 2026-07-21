@@ -21,6 +21,16 @@ pub struct ApiResponse<T: Serialize> {
 pub type AppResult<T> = Result<T, ApiError>;
 
 impl ApiError {
+    pub fn status(&self) -> StatusCode {
+        match self.code.as_str() {
+            "unauthorized" => StatusCode::UNAUTHORIZED,
+            "forbidden" => StatusCode::FORBIDDEN,
+            "not_found" => StatusCode::NOT_FOUND,
+            "internal_error" => StatusCode::INTERNAL_SERVER_ERROR,
+            _ => StatusCode::BAD_REQUEST,
+        }
+    }
+
     pub fn bad_request(message: impl std::fmt::Display) -> Self {
         Self {
             code: "bad_request".to_string(),
@@ -139,6 +149,10 @@ pub fn map_error(
     error_response(req, status, error)
 }
 
+pub fn error(req: &Request, error: ApiError) -> Result<Response<Body>, Error> {
+    error_response(req, error.status(), error)
+}
+
 fn response<T: Serialize>(
     req: &Request,
     status: StatusCode,
@@ -196,4 +210,34 @@ fn apply_headers(req: &Request, response: &mut Response<Body>) -> Result<(), Err
         .headers_mut()
         .insert("Vary", HeaderValue::from_static("Origin"));
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ApiError;
+    use lambda_http::http::StatusCode;
+
+    #[test]
+    fn maps_domain_error_codes_to_http_statuses() {
+        assert_eq!(
+            ApiError::unauthorized("no session").status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            ApiError::forbidden("not allowed").status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            ApiError::not_found("missing").status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            ApiError::internal("failed").status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(
+            ApiError::bad_request("invalid").status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
 }

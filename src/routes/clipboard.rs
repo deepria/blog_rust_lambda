@@ -1,6 +1,7 @@
-use crate::api::{self, ApiError};
+use crate::api;
 use crate::domain::auth;
 use crate::domain::clipboard::{self, UpsertClipboardRequest};
+use crate::routes::request::{method_not_allowed, parse_json};
 use lambda_http::http::StatusCode;
 use lambda_http::{Body, Error, Request, Response};
 
@@ -15,24 +16,12 @@ pub async fn handle(req: Request) -> Result<Response<Body>, Error> {
             Err(error) => api::map_error(&req, StatusCode::INTERNAL_SERVER_ERROR, error),
         },
         lambda_http::http::Method::PUT | lambda_http::http::Method::POST => {
-            let payload = parse_json_body::<UpsertClipboardRequest>(&req)?;
+            let payload = parse_json::<UpsertClipboardRequest>(&req)?;
             match clipboard::save_clipboard(&user.id, payload).await {
                 Ok(item) => api::ok(&req, item),
                 Err(error) => api::map_error(&req, StatusCode::BAD_REQUEST, error),
             }
         }
-        _ => api::map_error(
-            &req,
-            StatusCode::METHOD_NOT_ALLOWED,
-            ApiError::bad_request("method not allowed"),
-        ),
-    }
-}
-
-fn parse_json_body<T: serde::de::DeserializeOwned>(req: &Request) -> Result<T, Error> {
-    match req.body() {
-        Body::Text(body) => Ok(serde_json::from_str(body)?),
-        Body::Binary(body) => Ok(serde_json::from_slice(body)?),
-        _ => Err("invalid body".into()),
+        _ => method_not_allowed(&req),
     }
 }

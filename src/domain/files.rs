@@ -1,25 +1,26 @@
-use crate::api::{ApiError, AppResult};
-use crate::config::get_config;
-use crate::dynamodb::{delete_value, get_json, get_value, put_json};
-use crate::s3::{
+use self::storage_gateway::{
     abort_multipart_upload, build_key, complete_multipart_upload, create_multipart_upload,
     delete_object, list_objects, presign_delete, presign_download, presign_upload,
     presign_upload_part,
 };
+use crate::api::{ApiError, AppResult};
+use crate::config::get_config;
+use crate::dynamodb::{delete_value, put_json};
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use flate2::read::ZlibDecoder;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::io::Read;
 use uuid::Uuid;
 
 const FILE_META_PART: &str = "FILE_META";
 const FILE_ORG_PART: &str = "FILE_ORG";
 const LEGACY_FILE_AUTH_PART: &str = "file";
-const MAX_DIRECTORIES: usize = 200;
-const MAX_DIRECTORY_NAME_LEN: usize = 80;
+mod organization;
+mod repository;
+mod storage_gateway;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileItem {
@@ -134,7 +135,7 @@ pub async fn list_files(user_id: &str) -> AppResult<Vec<FileItem>> {
         if normalized.is_empty() {
             continue;
         }
-        let meta = load_meta(user_id, &normalized).await?;
+        let meta = repository::load_meta(user_id, &normalized).await?;
         let display_name = meta
             .as_ref()
             .map(|item| item.display_name.clone())
@@ -147,7 +148,7 @@ pub async fn list_files(user_id: &str) -> AppResult<Vec<FileItem>> {
             .as_ref()
             .and_then(|item| item.auth_hash.clone())
             .is_some()
-            || load_legacy_auth(&normalized).await?.is_some();
+            || repository::load_legacy_auth(&normalized).await?.is_some();
 
         items.push(FileItem {
             key: normalized,
@@ -165,14 +166,14 @@ pub async fn list_files(user_id: &str) -> AppResult<Vec<FileItem>> {
 }
 
 pub async fn get_organization(user_id: &str) -> AppResult<FileOrganization> {
-    load_organization(user_id).await
+    repository::load_organization(user_id).await
 }
 
 pub async fn save_organization(
     user_id: &str,
     organization: FileOrganization,
 ) -> AppResult<FileOrganization> {
-    let organization = normalize_organization(organization)?;
+    let organization = organization::normalize(organization)?;
     put_json(FILE_ORG_PART, &file_org_idx(user_id), &organization)
         .await
         .map_err(ApiError::internal)?;
@@ -397,74 +398,16 @@ pub async fn delete_file(user_id: &str, key: &str, auth_key: Option<&str>) -> Ap
     Ok(())
 }
 
-async fn load_organization(user_id: &str) -> AppResult<FileOrganization> {
-    get_json(FILE_ORG_PART, &file_org_idx(user_id))
-        .await
-        .map_err(ApiError::internal)
-        .map(|value| value.unwrap_or_default())
-}
-
 async fn remove_file_from_organization(user_id: &str, key: &str) -> AppResult<()> {
-    let mut organization = load_organization(user_id).await?;
+    let mut organization = repository::load_organization(user_id).await?;
     if organization.file_locations.remove(key).is_some() {
         save_organization(user_id, organization).await?;
     }
     Ok(())
 }
 
-fn normalize_organization(mut organization: FileOrganization) -> AppResult<FileOrganization> {
-    if organization.directories.len() > MAX_DIRECTORIES {
-        return Err(ApiError::bad_request("too many directories"));
-    }
-
-    let mut ids = HashSet::new();
-    for directory in &mut organization.directories {
-        directory.id = directory.id.trim().to_string();
-        directory.name = directory.name.trim().to_string();
-        directory.parent_id = directory
-            .parent_id
-            .as_ref()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty());
-
-        if directory.id.is_empty() || directory.id.len() > 80 {
-            return Err(ApiError::bad_request("invalid directory id"));
-        }
-        if !directory
-            .id
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
-        {
-            return Err(ApiError::bad_request("invalid directory id"));
-        }
-        if directory.name.is_empty() {
-            return Err(ApiError::bad_request("directory name is required"));
-        }
-        if directory.name.chars().count() > MAX_DIRECTORY_NAME_LEN {
-            return Err(ApiError::bad_request("directory name is too long"));
-        }
-        if !ids.insert(directory.id.clone()) {
-            return Err(ApiError::bad_request("duplicate directory id"));
-        }
-    }
-
-    for directory in &organization.directories {
-        if let Some(parent_id) = &directory.parent_id {
-            if parent_id == &directory.id || !ids.contains(parent_id) {
-                return Err(ApiError::bad_request("invalid parent directory"));
-            }
-        }
-    }
-
-    organization.file_locations.retain(|key, directory_id| {
-        validate_key(key).is_ok() && directory_id.as_ref().map_or(true, |id| ids.contains(id))
-    });
-
-    Ok(organization)
-}
-
 async fn assert_file_access(user_id: &str, key: &str, auth_key: Option<&str>) -> AppResult<()> {
-    let meta = load_meta(user_id, key).await?;
+    let meta = repository::load_meta(user_id, key).await?;
     if let Some(meta) = meta {
         if let Some(expected) = meta.auth_hash {
             let candidate = auth_key.unwrap_or_default();
@@ -475,7 +418,7 @@ async fn assert_file_access(user_id: &str, key: &str, auth_key: Option<&str>) ->
         return Ok(());
     }
 
-    if let Some(legacy) = load_legacy_auth(key).await? {
+    if let Some(legacy) = repository::load_legacy_auth(key).await? {
         let candidate = auth_key.unwrap_or_default();
         if candidate.is_empty() || candidate != legacy {
             return Err(ApiError::unauthorized("invalid file password"));
@@ -484,28 +427,8 @@ async fn assert_file_access(user_id: &str, key: &str, auth_key: Option<&str>) ->
     Ok(())
 }
 
-async fn load_meta(user_id: &str, key: &str) -> AppResult<Option<FileMeta>> {
-    get_json(FILE_META_PART, &file_meta_idx(user_id, key))
-        .await
-        .map_err(ApiError::internal)
-}
-
-async fn load_legacy_auth(key: &str) -> AppResult<Option<String>> {
-    let Some(raw) = get_value(LEGACY_FILE_AUTH_PART, &legacy_auth_index(key))
-        .await
-        .map_err(ApiError::internal)?
-    else {
-        return Ok(None);
-    };
-    let value = decode_legacy_string(&raw).unwrap_or(raw);
-    if value.is_empty() {
-        return Ok(None);
-    }
-    Ok(Some(value))
-}
-
 async fn resolve_display_name(user_id: &str, key: &str) -> AppResult<String> {
-    let meta = load_meta(user_id, key).await?;
+    let meta = repository::load_meta(user_id, key).await?;
     let display_name = meta
         .map(|item| item.display_name)
         .filter(|value| !value.is_empty())

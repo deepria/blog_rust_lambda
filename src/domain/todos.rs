@@ -20,14 +20,34 @@ pub struct TodoOption {
     pub color: String,
 }
 
-pub async fn get_todos(user_id: &str) -> AppResult<Vec<Value>> {
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum TodoId {
+    Number(i64),
+    Text(String),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TodoItem {
+    pub id: TodoId,
+    #[serde(default)]
+    pub text: String,
+    #[serde(default, rename = "groupKey")]
+    pub group_key: Option<i64>,
+    #[serde(default, rename = "priorityKey")]
+    pub priority_key: Option<i64>,
+    #[serde(default)]
+    pub completed: bool,
+}
+
+pub async fn get_todos(user_id: &str) -> AppResult<Vec<TodoItem>> {
     let raw = get_value(TODO_PART, &todo_items_idx(user_id))
         .await
         .map_err(ApiError::internal)?;
     parse_todo_items(raw.as_deref())
 }
 
-pub async fn save_todos(user_id: &str, items: Vec<Value>) -> AppResult<Vec<Value>> {
+pub async fn save_todos(user_id: &str, items: Vec<TodoItem>) -> AppResult<Vec<TodoItem>> {
     validate_items(&items)?;
     put_value(
         TODO_PART,
@@ -63,24 +83,26 @@ fn todo_meta_idx(user_id: &str) -> String {
     format!("user:{user_id}:meta")
 }
 
-fn validate_items(items: &[Value]) -> AppResult<()> {
-    if items.iter().any(|item| !item.is_object()) {
-        return Err(ApiError::bad_request("todos must be an array of objects"));
+fn validate_items(items: &[TodoItem]) -> AppResult<()> {
+    if items.iter().any(|item| item.text.chars().count() > 500) {
+        return Err(ApiError::bad_request("todo text is too long"));
     }
     Ok(())
 }
 
-pub fn parse_todo_items(raw: Option<&str>) -> AppResult<Vec<Value>> {
+pub fn parse_todo_items(raw: Option<&str>) -> AppResult<Vec<TodoItem>> {
     match raw {
         None | Some("") => Ok(Vec::new()),
         Some(raw) => {
             let value: Value = serde_json::from_str(raw)
                 .map_err(|_| ApiError::bad_request("stored todos are not valid JSON"))?;
             if let Some(items) = value.as_array() {
-                return Ok(items.clone());
+                return serde_json::from_value(Value::Array(items.clone()))
+                    .map_err(|_| ApiError::bad_request("stored todos have an invalid shape"));
             }
             if let Some(items) = value.get("data").and_then(Value::as_array) {
-                return Ok(items.clone());
+                return serde_json::from_value(Value::Array(items.clone()))
+                    .map_err(|_| ApiError::bad_request("stored todos have an invalid shape"));
             }
             Err(ApiError::bad_request("stored todos are not an array"))
         }
@@ -122,12 +144,13 @@ fn normalize_meta(mut meta: TodoMeta) -> TodoMeta {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_meta, parse_todo_items};
+    use super::{parse_meta, parse_todo_items, TodoId};
 
     #[test]
     fn parses_legacy_todo_array() {
         let items = parse_todo_items(Some(r#"[{"id":1},{"id":2}]"#)).unwrap();
         assert_eq!(items.len(), 2);
+        assert_eq!(items[0].id, TodoId::Number(1));
     }
 
     #[test]

@@ -1,5 +1,6 @@
 use crate::api::{self, ApiError};
 use crate::domain::auth::{self, AuthProvider, OAuthCallbackResult};
+use crate::routes::request::{method_not_allowed, parse_json, query_value};
 use lambda_http::http::{Method, StatusCode};
 use lambda_http::{Body, Error, Request, Response};
 use serde::Deserialize;
@@ -85,16 +86,16 @@ pub async fn handle_callback(req: Request, provider: &str) -> Result<Response<Bo
     };
     match auth::handle_oauth_callback(&req, provider, code, state).await {
         Ok(OAuthCallbackResult::Web { bundle, return_to }) => {
-            let mut cookies = auth::session_cookies(&bundle);
+            let mut cookies = auth::cookies::session_cookies(&bundle);
             cookies.extend(
-                auth::clear_cookies()
+                auth::cookies::clear_cookies()
                     .into_iter()
                     .filter(|cookie| cookie.starts_with("dc_oauth_state=")),
             );
             api::redirect_with_cookies(&req, &return_to, &cookies)
         }
         Ok(OAuthCallbackResult::Mobile { redirect_to }) => {
-            let cookies = auth::clear_cookies()
+            let cookies = auth::cookies::clear_cookies()
                 .into_iter()
                 .filter(|cookie| cookie.starts_with("dc_oauth_state="))
                 .collect::<Vec<_>>();
@@ -113,13 +114,13 @@ pub async fn handle_mobile_complete(req: Request) -> Result<Response<Body>, Erro
     if *req.method() != Method::POST {
         return method_not_allowed(&req);
     }
-    let payload = match parse_json_body::<MobileCompleteRequest>(&req) {
+    let payload = match parse_json::<MobileCompleteRequest>(&req) {
         Ok(payload) => payload,
         Err(error) => return Err(error),
     };
     match auth::complete_mobile_login(&req, &payload.code).await {
         Ok((session, bundle)) => {
-            api::ok_with_cookies(&req, session, &auth::session_cookies(&bundle))
+            api::ok_with_cookies(&req, session, &auth::cookies::session_cookies(&bundle))
         }
         Err(error) => map_auth_error(&req, error),
     }
@@ -131,7 +132,7 @@ pub async fn handle_refresh(req: Request) -> Result<Response<Body>, Error> {
     }
     match auth::refresh_session(&req).await {
         Ok((session, bundle)) => {
-            api::ok_with_cookies(&req, session, &auth::session_cookies(&bundle))
+            api::ok_with_cookies(&req, session, &auth::cookies::session_cookies(&bundle))
         }
         Err(error) => map_auth_error(&req, error),
     }
@@ -145,7 +146,7 @@ pub async fn handle_logout(req: Request) -> Result<Response<Body>, Error> {
         Ok(_) => api::ok_with_cookies(
             &req,
             serde_json::json!({ "ok": true }),
-            &auth::clear_cookies(),
+            &auth::cookies::clear_cookies(),
         ),
         Err(error) => map_auth_error(&req, error),
     }
@@ -169,36 +170,6 @@ pub async fn handle_disconnect(req: Request, provider: &str) -> Result<Response<
     }
 }
 
-fn method_not_allowed(req: &Request) -> Result<Response<Body>, Error> {
-    api::map_error(
-        req,
-        StatusCode::METHOD_NOT_ALLOWED,
-        ApiError::bad_request("method not allowed"),
-    )
-}
-
 pub fn map_auth_error(req: &Request, error: ApiError) -> Result<Response<Body>, Error> {
-    let status = match error.code.as_str() {
-        "unauthorized" => StatusCode::UNAUTHORIZED,
-        "forbidden" => StatusCode::FORBIDDEN,
-        "not_found" => StatusCode::NOT_FOUND,
-        _ => StatusCode::BAD_REQUEST,
-    };
-    api::map_error(req, status, error)
-}
-
-fn query_value(req: &Request, key: &str) -> Option<String> {
-    req.uri().query().and_then(|query| {
-        url::form_urlencoded::parse(query.as_bytes())
-            .find(|(name, _)| name == key)
-            .map(|(_, value)| value.to_string())
-    })
-}
-
-fn parse_json_body<T: serde::de::DeserializeOwned>(req: &Request) -> Result<T, Error> {
-    match req.body() {
-        Body::Text(body) => Ok(serde_json::from_str(body)?),
-        Body::Binary(body) => Ok(serde_json::from_slice(body)?),
-        _ => Err("invalid body".into()),
-    }
+    api::error(req, error)
 }

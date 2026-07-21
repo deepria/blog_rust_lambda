@@ -1,6 +1,7 @@
 use crate::api;
 use crate::domain::auth;
 use crate::domain::chat::{self, ChatRequest};
+use crate::routes::request::parse_json;
 use lambda_http::http::StatusCode;
 use lambda_http::{Body, Error, Request, Response};
 
@@ -8,17 +9,9 @@ pub async fn handle(req: Request) -> Result<Response<Body>, Error> {
     if let Err(error) = auth::require_user(&req).await {
         return crate::routes::auth::map_auth_error(&req, error);
     }
-    let payload: ChatRequest = parse_json_body(&req)?;
+    let payload: ChatRequest = parse_json(&req)?;
     match chat::send_message(payload).await {
         Ok(data) => api::ok(&req, data),
         Err(error) => api::map_error(&req, StatusCode::BAD_REQUEST, error),
-    }
-}
-
-fn parse_json_body<T: serde::de::DeserializeOwned>(req: &Request) -> Result<T, Error> {
-    match req.body() {
-        Body::Text(body) => Ok(serde_json::from_str(body)?),
-        Body::Binary(body) => Ok(serde_json::from_slice(body)?),
-        _ => Err("invalid body".into()),
     }
 }

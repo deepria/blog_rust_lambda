@@ -102,3 +102,32 @@ pub async fn function_handler(req: Request) -> Result<Response<Body>, Error> {
         ),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::function_handler;
+    use lambda_http::http::{Request as HttpRequest, StatusCode};
+    use lambda_http::Body;
+
+    #[tokio::test]
+    async fn health_endpoint_returns_ok_without_infrastructure() {
+        let request = HttpRequest::builder()
+            .method("GET")
+            .uri("/health")
+            .body(Body::Empty)
+            .unwrap();
+        let response = function_handler(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn unknown_route_returns_not_found_without_infrastructure() {
+        let request = HttpRequest::builder()
+            .method("GET")
+            .uri("/not-a-route")
+            .body(Body::Empty)
+            .unwrap();
+        let response = function_handler(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+}
