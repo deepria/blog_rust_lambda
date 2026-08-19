@@ -340,6 +340,16 @@ pub async fn find_active_user_by_email(email: &str) -> AppResult<Option<User>> {
     Ok((user.status == UserStatus::Active).then_some(user))
 }
 
+pub async fn find_active_user_by_id(user_id: &str) -> AppResult<Option<User>> {
+    match get_json::<User>(USER_PART, user_id)
+        .await
+        .map_err(ApiError::internal)?
+    {
+        Some(user) if user.status == UserStatus::Active => Ok(Some(user)),
+        _ => Ok(None),
+    }
+}
+
 pub async fn refresh_session(req: &Request) -> AppResult<(AuthSession, CookieBundle)> {
     let token = cookies::cookie_value(req, REFRESH_COOKIE)
         .ok_or_else(|| ApiError::unauthorized("refresh token missing"))?;

@@ -50,7 +50,10 @@ pub struct SharedFileItem {
 
 #[derive(Debug, Deserialize)]
 pub struct ShareFileRequest {
-    pub email: String,
+    #[serde(default)]
+    pub email: Option<String>,
+    #[serde(default)]
+    pub viewer_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -451,7 +454,8 @@ pub async fn share_file(
         &key,
         &display_name,
         has_password,
-        &payload.email,
+        payload.email.as_deref(),
+        payload.viewer_id.as_deref(),
     )
     .await
 }

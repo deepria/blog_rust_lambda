@@ -28,6 +28,8 @@ pub async fn function_handler(req: Request) -> Result<Response<Body>, Error> {
         "/api/files" => routes::files::handle_collection(req).await,
         "/api/files/shared-with-me" => routes::files::handle_shared_collection(req).await,
         "/api/files/organization" => routes::files::handle_organization(req).await,
+        "/api/friends" => routes::friends::handle_overview(req).await,
+        "/api/friend-requests" => routes::friends::handle_requests(req).await,
         "/api/files/presign-upload" if req.method() == "POST" => {
             routes::files::handle_presign_upload(req).await
         }
@@ -87,6 +89,21 @@ pub async fn function_handler(req: Request) -> Result<Response<Body>, Error> {
                 .trim_end_matches("/login")
                 .trim_matches('/');
             routes::auth::handle_login(req, provider).await
+        }
+        _ if path.starts_with("/api/friend-requests/") && path.ends_with("/accept") => {
+            let request_id = path
+                .trim_start_matches("/api/friend-requests/")
+                .trim_end_matches("/accept")
+                .trim_matches('/');
+            routes::friends::handle_accept(req, request_id).await
+        }
+        _ if path.starts_with("/api/friend-requests/") => {
+            let request_id = path.trim_start_matches("/api/friend-requests/");
+            routes::friends::handle_request(req, request_id).await
+        }
+        _ if path.starts_with("/api/friends/") => {
+            let friend_id = path.trim_start_matches("/api/friends/");
+            routes::friends::handle_friend(req, friend_id).await
         }
         _ if path.starts_with("/api/files/") && path.ends_with("/viewers") => {
             let key = path

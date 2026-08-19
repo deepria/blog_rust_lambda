@@ -1,6 +1,6 @@
 use super::{repository, FileViewer, SharedFileItem};
 use crate::api::{ApiError, AppResult};
-use crate::domain::auth;
+use crate::domain::{auth, friends};
 use crate::dynamodb::{delete_value, get_json, put_json, query_json_prefix};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -42,11 +42,23 @@ pub(super) async fn add_viewer(
     key: &str,
     display_name: &str,
     has_password: bool,
-    email: &str,
+    email: Option<&str>,
+    viewer_id: Option<&str>,
 ) -> AppResult<FileViewer> {
-    let viewer = auth::find_active_user_by_email(email)
-        .await?
-        .ok_or_else(|| ApiError::not_found("registered user not found"))?;
+    let viewer = if let Some(viewer_id) = viewer_id {
+        if !friends::are_friends(owner_id, viewer_id).await? {
+            return Err(ApiError::forbidden("files can only be shared with friends"));
+        }
+        auth::find_active_user_by_id(viewer_id)
+            .await?
+            .ok_or_else(|| ApiError::not_found("registered user not found"))?
+    } else if let Some(email) = email {
+        auth::find_active_user_by_email(email)
+            .await?
+            .ok_or_else(|| ApiError::not_found("registered user not found"))?
+    } else {
+        return Err(ApiError::bad_request("viewer_id is required"));
+    };
     if viewer.id == owner_id {
         return Err(ApiError::bad_request("the file owner already has access"));
     }

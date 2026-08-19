@@ -1,10 +1,25 @@
 use crate::config::get_config;
 use aws_config::BehaviorVersion;
-use aws_sdk_dynamodb::{types::AttributeValue, Client};
+use aws_sdk_dynamodb::{
+    types::{AttributeValue, Delete, Put, TransactWriteItem},
+    Client,
+};
 use std::collections::HashMap;
 use tokio::sync::OnceCell;
 
 static DYNAMODB_CLIENT: OnceCell<Client> = OnceCell::const_new();
+
+pub struct TransactionPut {
+    pub part: String,
+    pub idx: String,
+    pub value: String,
+    pub if_absent: bool,
+}
+
+pub struct TransactionDelete {
+    pub part: String,
+    pub idx: String,
+}
 
 async fn dynamodb_client() -> &'static Client {
     DYNAMODB_CLIENT
@@ -202,5 +217,49 @@ pub async fn delete_value(
         .send()
         .await?;
 
+    Ok(())
+}
+
+pub async fn transact_write_values(
+    puts: Vec<TransactionPut>,
+    deletes: Vec<TransactionDelete>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let client = dynamodb_client().await;
+    let table_name = &get_config().dynamodb_table;
+    let mut operations = Vec::with_capacity(puts.len() + deletes.len());
+
+    for entry in puts {
+        let mut item = HashMap::new();
+        item.insert("part".to_string(), AttributeValue::S(entry.part));
+        item.insert("idx".to_string(), AttributeValue::S(entry.idx));
+        item.insert("value".to_string(), AttributeValue::S(entry.value));
+        let mut put = Put::builder().table_name(table_name).set_item(Some(item));
+        if entry.if_absent {
+            put = put
+                .condition_expression("attribute_not_exists(#part) AND attribute_not_exists(#idx)")
+                .expression_attribute_names("#part", "part")
+                .expression_attribute_names("#idx", "idx");
+        }
+        operations.push(TransactWriteItem::builder().put(put.build()?).build());
+    }
+
+    for entry in deletes {
+        let mut key = HashMap::new();
+        key.insert("part".to_string(), AttributeValue::S(entry.part));
+        key.insert("idx".to_string(), AttributeValue::S(entry.idx));
+        let delete = Delete::builder()
+            .table_name(table_name)
+            .set_key(Some(key))
+            .build()?;
+        operations.push(TransactWriteItem::builder().delete(delete).build());
+    }
+
+    if !operations.is_empty() {
+        client
+            .transact_write_items()
+            .set_transact_items(Some(operations))
+            .send()
+            .await?;
+    }
     Ok(())
 }
