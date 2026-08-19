@@ -54,6 +54,43 @@ pub async fn get_json<T: serde::de::DeserializeOwned>(
         .map_err(|e| e.into())
 }
 
+pub async fn query_json_prefix<T: serde::de::DeserializeOwned>(
+    part: &str,
+    idx_prefix: &str,
+) -> Result<Vec<T>, Box<dyn std::error::Error + Send + Sync>> {
+    let client = dynamodb_client().await;
+    let mut items = Vec::new();
+    let mut start_key = None;
+
+    loop {
+        let output = client
+            .query()
+            .table_name(&get_config().dynamodb_table)
+            .key_condition_expression("#part = :part AND begins_with(#idx, :prefix)")
+            .expression_attribute_names("#part", "part")
+            .expression_attribute_names("#idx", "idx")
+            .expression_attribute_values(":part", AttributeValue::S(part.to_string()))
+            .expression_attribute_values(":prefix", AttributeValue::S(idx_prefix.to_string()))
+            .set_exclusive_start_key(start_key)
+            .send()
+            .await?;
+
+        for item in output.items.unwrap_or_default() {
+            let Some(AttributeValue::S(raw)) = item.get("value") else {
+                continue;
+            };
+            items.push(serde_json::from_str(raw)?);
+        }
+
+        start_key = output.last_evaluated_key;
+        if start_key.as_ref().is_none_or(HashMap::is_empty) {
+            break;
+        }
+    }
+
+    Ok(items)
+}
+
 pub async fn put_value(
     part: &str,
     idx: &str,

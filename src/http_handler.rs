@@ -26,6 +26,7 @@ pub async fn function_handler(req: Request) -> Result<Response<Body>, Error> {
         "/api/todo-meta" => routes::todos::handle_meta(req).await,
         "/api/memos" => routes::memos::handle_collection(req).await,
         "/api/files" => routes::files::handle_collection(req).await,
+        "/api/files/shared-with-me" => routes::files::handle_shared_collection(req).await,
         "/api/files/organization" => routes::files::handle_organization(req).await,
         "/api/files/presign-upload" if req.method() == "POST" => {
             routes::files::handle_presign_upload(req).await
@@ -86,6 +87,24 @@ pub async fn function_handler(req: Request) -> Result<Response<Body>, Error> {
                 .trim_end_matches("/login")
                 .trim_matches('/');
             routes::auth::handle_login(req, provider).await
+        }
+        _ if path.starts_with("/api/files/") && path.ends_with("/viewers") => {
+            let key = path
+                .trim_start_matches("/api/files/")
+                .trim_end_matches("/viewers")
+                .trim_matches('/');
+            routes::files::handle_viewers(req, key).await
+        }
+        _ if path.starts_with("/api/files/") && path.contains("/viewers/") => {
+            let remainder = path.trim_start_matches("/api/files/");
+            let Some((key, viewer_id)) = remainder.split_once("/viewers/") else {
+                return api::map_error(
+                    &req,
+                    StatusCode::BAD_REQUEST,
+                    ApiError::bad_request("invalid viewer route"),
+                );
+            };
+            routes::files::handle_viewer(req, key, viewer_id).await
         }
         _ if path.starts_with("/api/files/") && req.method() == "DELETE" => {
             let key = path.trim_start_matches("/api/files/");

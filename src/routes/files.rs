@@ -2,7 +2,7 @@ use crate::api::{self, ApiError};
 use crate::domain::auth;
 use crate::domain::files::{
     self, AbortMultipartRequest, AccessRequest, CompleteMultipartRequest, FileOrganization,
-    MultipartPartRequest, UploadRequest,
+    MultipartPartRequest, ShareFileRequest, UploadRequest,
 };
 use crate::routes::request::{method_not_allowed, parse_json, query_value};
 use lambda_http::http::StatusCode;
@@ -23,6 +23,59 @@ pub async fn handle_collection(req: Request) -> Result<Response<Body>, Error> {
             StatusCode::METHOD_NOT_ALLOWED,
             ApiError::bad_request("method not allowed"),
         ),
+    }
+}
+
+pub async fn handle_shared_collection(req: Request) -> Result<Response<Body>, Error> {
+    let user = match auth::require_user(&req).await {
+        Ok(user) => user,
+        Err(error) => return crate::routes::auth::map_auth_error(&req, error),
+    };
+    if req.method() != lambda_http::http::Method::GET {
+        return method_not_allowed(&req);
+    }
+    match files::list_shared_files(&user.id).await {
+        Ok(items) => api::ok(&req, serde_json::json!({ "items": items })),
+        Err(error) => api::error(&req, error),
+    }
+}
+
+pub async fn handle_viewers(req: Request, key: &str) -> Result<Response<Body>, Error> {
+    let user = match auth::require_user(&req).await {
+        Ok(user) => user,
+        Err(error) => return crate::routes::auth::map_auth_error(&req, error),
+    };
+    match *req.method() {
+        lambda_http::http::Method::GET => match files::list_file_viewers(&user.id, key).await {
+            Ok(items) => api::ok(&req, serde_json::json!({ "items": items })),
+            Err(error) => api::error(&req, error),
+        },
+        lambda_http::http::Method::POST => {
+            let payload = parse_json::<ShareFileRequest>(&req)?;
+            match files::share_file(&user.id, &user.name, key, payload).await {
+                Ok(viewer) => api::created(&req, viewer),
+                Err(error) => api::error(&req, error),
+            }
+        }
+        _ => method_not_allowed(&req),
+    }
+}
+
+pub async fn handle_viewer(
+    req: Request,
+    key: &str,
+    viewer_id: &str,
+) -> Result<Response<Body>, Error> {
+    let user = match auth::require_user(&req).await {
+        Ok(user) => user,
+        Err(error) => return crate::routes::auth::map_auth_error(&req, error),
+    };
+    if req.method() != lambda_http::http::Method::DELETE {
+        return method_not_allowed(&req);
+    }
+    match files::unshare_file(&user.id, key, viewer_id).await {
+        Ok(_) => api::no_content(&req),
+        Err(error) => api::error(&req, error),
     }
 }
 
@@ -115,14 +168,7 @@ pub async fn handle_presign_download(req: Request) -> Result<Response<Body>, Err
     let payload = parse_json::<AccessRequest>(&req)?;
     match files::create_download(&user.id, payload).await {
         Ok(data) => api::ok(&req, data),
-        Err(error) => {
-            let status = if error.code == "unauthorized" {
-                StatusCode::UNAUTHORIZED
-            } else {
-                StatusCode::BAD_REQUEST
-            };
-            api::map_error(&req, status, error)
-        }
+        Err(error) => api::error(&req, error),
     }
 }
 

@@ -325,6 +325,21 @@ pub async fn require_user(req: &Request) -> AppResult<User> {
     Ok(user)
 }
 
+pub async fn find_active_user_by_email(email: &str) -> AppResult<Option<User>> {
+    let email = normalize_email(email);
+    if email.is_empty() {
+        return Err(ApiError::bad_request("email is required"));
+    }
+    let Some(user_id) = get_value(USER_EMAIL_PART, &email)
+        .await
+        .map_err(ApiError::internal)?
+    else {
+        return Ok(None);
+    };
+    let user = load_user(&user_id).await?;
+    Ok((user.status == UserStatus::Active).then_some(user))
+}
+
 pub async fn refresh_session(req: &Request) -> AppResult<(AuthSession, CookieBundle)> {
     let token = cookies::cookie_value(req, REFRESH_COOKIE)
         .ok_or_else(|| ApiError::unauthorized("refresh token missing"))?;

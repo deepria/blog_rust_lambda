@@ -20,6 +20,7 @@ const FILE_ORG_PART: &str = "FILE_ORG";
 const LEGACY_FILE_AUTH_PART: &str = "file";
 mod organization;
 mod repository;
+mod sharing;
 mod storage_gateway;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,6 +28,29 @@ pub struct FileItem {
     pub key: String,
     pub display_name: String,
     pub has_password: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileViewer {
+    pub viewer_id: String,
+    pub viewer_email: String,
+    pub viewer_name: String,
+    pub shared_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SharedFileItem {
+    pub key: String,
+    pub display_name: String,
+    pub has_password: bool,
+    pub owner_id: String,
+    pub owner_name: String,
+    pub shared_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ShareFileRequest {
+    pub email: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -112,6 +136,8 @@ pub struct UploadPartResponse {
 pub struct AccessRequest {
     pub key: String,
     pub auth_key: Option<String>,
+    #[serde(default)]
+    pub owner_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -351,14 +377,17 @@ pub async fn cancel_multipart_upload(
 }
 
 pub async fn create_download(
-    user_id: &str,
+    actor_id: &str,
     payload: AccessRequest,
 ) -> AppResult<PresignedResponse> {
     let key = validate_key(&payload.key)?;
-    assert_file_access(user_id, &key, payload.auth_key.as_deref()).await?;
-    let display_name = resolve_display_name(user_id, &key).await?;
+    let owner_id = payload.owner_id.as_deref().unwrap_or(actor_id);
+    validate_owner_id(owner_id)?;
+    sharing::assert_can_read(actor_id, owner_id, &key).await?;
+    assert_file_access(owner_id, &key, payload.auth_key.as_deref()).await?;
+    let display_name = resolve_display_name(owner_id, &key).await?;
     let url = presign_download(
-        build_key(&user_base_path(user_id), "", None, None, &key),
+        build_key(&user_base_path(owner_id), "", None, None, &key),
         display_name,
     )
     .await
@@ -379,6 +408,7 @@ pub async fn create_delete(user_id: &str, payload: AccessRequest) -> AppResult<P
         .await
         .map_err(ApiError::internal)?;
     remove_file_from_organization(user_id, &key).await?;
+    sharing::remove_all_viewers(user_id, &key).await?;
     Ok(PresignedResponse { url })
 }
 
@@ -395,7 +425,45 @@ pub async fn delete_file(user_id: &str, key: &str, auth_key: Option<&str>) -> Ap
         .await
         .map_err(ApiError::internal)?;
     remove_file_from_organization(user_id, &key).await?;
+    sharing::remove_all_viewers(user_id, &key).await?;
     Ok(())
+}
+
+pub async fn list_file_viewers(owner_id: &str, key: &str) -> AppResult<Vec<FileViewer>> {
+    let key = validate_key(key)?;
+    ensure_file_exists(owner_id, &key).await?;
+    sharing::list_viewers(owner_id, &key).await
+}
+
+pub async fn share_file(
+    owner_id: &str,
+    owner_name: &str,
+    key: &str,
+    payload: ShareFileRequest,
+) -> AppResult<FileViewer> {
+    let key = validate_key(key)?;
+    ensure_file_exists(owner_id, &key).await?;
+    let display_name = resolve_display_name(owner_id, &key).await?;
+    let has_password = file_has_password(owner_id, &key).await?;
+    sharing::add_viewer(
+        owner_id,
+        owner_name,
+        &key,
+        &display_name,
+        has_password,
+        &payload.email,
+    )
+    .await
+}
+
+pub async fn unshare_file(owner_id: &str, key: &str, viewer_id: &str) -> AppResult<()> {
+    let key = validate_key(key)?;
+    validate_owner_id(viewer_id)?;
+    sharing::remove_viewer(owner_id, &key, viewer_id).await
+}
+
+pub async fn list_shared_files(viewer_id: &str) -> AppResult<Vec<SharedFileItem>> {
+    sharing::list_shared_files(viewer_id).await
 }
 
 async fn remove_file_from_organization(user_id: &str, key: &str) -> AppResult<()> {
@@ -425,6 +493,29 @@ async fn assert_file_access(user_id: &str, key: &str, auth_key: Option<&str>) ->
         }
     }
     Ok(())
+}
+
+async fn ensure_file_exists(user_id: &str, key: &str) -> AppResult<()> {
+    if repository::load_meta(user_id, key).await?.is_some() {
+        return Ok(());
+    }
+    let exists = list_files(user_id)
+        .await?
+        .iter()
+        .any(|item| item.key == key);
+    if exists {
+        Ok(())
+    } else {
+        Err(ApiError::not_found("file not found"))
+    }
+}
+
+async fn file_has_password(user_id: &str, key: &str) -> AppResult<bool> {
+    let meta_password = repository::load_meta(user_id, key)
+        .await?
+        .and_then(|meta| meta.auth_hash)
+        .is_some();
+    Ok(meta_password || repository::load_legacy_auth(key).await?.is_some())
 }
 
 async fn resolve_display_name(user_id: &str, key: &str) -> AppResult<String> {
@@ -474,6 +565,17 @@ fn validate_key(key: &str) -> AppResult<String> {
         return Err(ApiError::bad_request("invalid file key"));
     }
     Ok(key.to_string())
+}
+
+fn validate_owner_id(owner_id: &str) -> AppResult<()> {
+    if owner_id.trim().is_empty()
+        || owner_id.contains('/')
+        || owner_id.contains("..")
+        || owner_id.contains(':')
+    {
+        return Err(ApiError::bad_request("invalid owner_id"));
+    }
+    Ok(())
 }
 
 fn validate_upload_id(upload_id: &str) -> AppResult<String> {
