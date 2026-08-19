@@ -106,26 +106,29 @@ pub async fn function_handler(req: Request) -> Result<Response<Body>, Error> {
             routes::friends::handle_friend(req, friend_id).await
         }
         _ if path.starts_with("/api/files/") && path.ends_with("/viewers") => {
-            let key = path
+            let raw_key = path
                 .trim_start_matches("/api/files/")
                 .trim_end_matches("/viewers")
                 .trim_matches('/');
-            routes::files::handle_viewers(req, key).await
+            let key = routes::request::decode_storage_key_segment(raw_key);
+            routes::files::handle_viewers(req, &key).await
         }
         _ if path.starts_with("/api/files/") && path.contains("/viewers/") => {
             let remainder = path.trim_start_matches("/api/files/");
-            let Some((key, viewer_id)) = remainder.split_once("/viewers/") else {
+            let Some((raw_key, viewer_id)) = remainder.split_once("/viewers/") else {
                 return api::map_error(
                     &req,
                     StatusCode::BAD_REQUEST,
                     ApiError::bad_request("invalid viewer route"),
                 );
             };
-            routes::files::handle_viewer(req, key, viewer_id).await
+            let key = routes::request::decode_storage_key_segment(raw_key);
+            routes::files::handle_viewer(req, &key, viewer_id).await
         }
         _ if path.starts_with("/api/files/") && req.method() == "DELETE" => {
-            let key = path.trim_start_matches("/api/files/");
-            routes::files::handle_delete(req, key).await
+            let raw_key = path.trim_start_matches("/api/files/");
+            let key = routes::request::decode_storage_key_segment(raw_key);
+            routes::files::handle_delete(req, &key).await
         }
         _ => api::map_error(
             &req,
