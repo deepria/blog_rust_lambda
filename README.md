@@ -55,3 +55,28 @@ Read more about invoking the function in [the Cargo Lambda documentation for the
 To deploy the project, run `cargo lambda deploy`. This will create an IAM role and a Lambda function in your AWS account.
 
 Read more about deploying your lambda function in [the Cargo Lambda documentation](https://www.cargo-lambda.info/commands/deploy.html).
+
+## User settings API
+
+Both endpoints require an authenticated session and use the authenticated user's ID;
+clients cannot read or update another user's settings.
+
+- `GET /api/settings` returns `{"data":{"dashboard_gallery_enabled":true}}`
+  for users with no saved settings.
+- `PUT /api/settings` accepts `{"dashboard_gallery_enabled":false}` and returns
+  the saved settings in the same `data` envelope. The field is required and must be
+  a JSON boolean; malformed bodies, missing fields, and unknown fields return HTTP 400.
+- Settings persist per account in the existing DynamoDB table under
+  `part=USER_SETTINGS`, `idx=user:<user_id>`. No table migration is required.
+- The frontend can fetch these settings on another device or when returning to the
+  dashboard. This endpoint does not provide live push updates to already open tabs.
+
+## File registration timestamps
+
+`GET /api/files` and `GET /api/files/shared-with-me` include `created_at` on each
+item: Unix seconds from the owner's file metadata, or `null` for legacy files
+without a recorded timestamp. Registration time is the upload presign or multipart
+initiation time, matching the metadata already recorded by the upload flow; it is
+not upload completion time. Shared items retain their separate `shared_at` field.
+Clients can sort by `created_at` without an additional sorting endpoint or database
+migration.

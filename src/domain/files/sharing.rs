@@ -160,12 +160,9 @@ pub(super) async fn list_shared_files(viewer_id: &str) -> AppResult<Vec<SharedFi
     let mut items = Vec::new();
     for share in shares {
         // Owner-side metadata is the source of truth; stale reverse-index entries stay hidden.
-        if repository::load_meta(&share.owner_id, &share.key)
-            .await?
-            .is_none()
-        {
+        let Some(meta) = repository::load_meta(&share.owner_id, &share.key).await? else {
             continue;
-        }
+        };
         items.push(SharedFileItem {
             key: share.key,
             display_name: share.display_name,
@@ -173,6 +170,7 @@ pub(super) async fn list_shared_files(viewer_id: &str) -> AppResult<Vec<SharedFi
             owner_id: share.owner_id,
             owner_name: share.owner_name,
             shared_at: share.shared_at,
+            created_at: meta.created_at,
         });
     }
     items.sort_by(|a, b| {

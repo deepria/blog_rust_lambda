@@ -28,6 +28,7 @@ pub struct FileItem {
     pub key: String,
     pub display_name: String,
     pub has_password: bool,
+    pub created_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,6 +47,7 @@ pub struct SharedFileItem {
     pub owner_id: String,
     pub owner_name: String,
     pub shared_at: String,
+    pub created_at: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -183,6 +185,7 @@ pub async fn list_files(user_id: &str) -> AppResult<Vec<FileItem>> {
             key: normalized,
             display_name,
             has_password,
+            created_at: meta.as_ref().and_then(|item| item.created_at),
         });
     }
 
@@ -712,6 +715,39 @@ mod tests {
     use super::{
         ensure_display_extension, hash_auth_key, sanitize_name, upload_display_name, validate_key,
     };
+
+    #[test]
+    fn legacy_file_metadata_has_no_registration_timestamp() {
+        let meta: super::FileMeta =
+            serde_json::from_str(r#"{"key":"legacy.txt","display_name":"legacy.txt"}"#).unwrap();
+        assert_eq!(meta.created_at, None);
+        let item = super::FileItem {
+            key: meta.key,
+            display_name: meta.display_name,
+            has_password: false,
+            created_at: meta.created_at,
+        };
+        assert_eq!(
+            serde_json::to_value(item).unwrap()["created_at"],
+            serde_json::Value::Null
+        );
+    }
+
+    #[test]
+    fn shared_file_registration_and_share_dates_are_separate() {
+        let item = super::SharedFileItem {
+            key: "file.txt".to_string(),
+            display_name: "file.txt".to_string(),
+            has_password: false,
+            owner_id: "owner".to_string(),
+            owner_name: "Owner".to_string(),
+            shared_at: "2026-10-26T01:00:00Z".to_string(),
+            created_at: Some(1_700_000_000),
+        };
+        let json = serde_json::to_value(item).unwrap();
+        assert_eq!(json["created_at"], 1_700_000_000);
+        assert_eq!(json["shared_at"], "2026-10-26T01:00:00Z");
+    }
 
     #[test]
     fn rejects_nested_keys() {

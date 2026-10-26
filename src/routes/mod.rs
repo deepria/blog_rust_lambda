@@ -5,4 +5,5 @@ pub mod files;
 pub mod friends;
 pub mod memos;
 pub mod request;
+pub mod settings;
 pub mod todos;

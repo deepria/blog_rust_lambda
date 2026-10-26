@@ -21,6 +21,7 @@ pub async fn function_handler(req: Request) -> Result<Response<Body>, Error> {
         "/api/auth/logout" => routes::auth::handle_logout(req).await,
         "/api/auth/mobile/complete" => routes::auth::handle_mobile_complete(req).await,
         "/api/chat" if req.method() == "POST" => routes::chat::handle(req).await,
+        "/api/settings" => routes::settings::handle(req).await,
         "/api/clipboard" => routes::clipboard::handle(req).await,
         "/api/todos" => routes::todos::handle_todos(req).await,
         "/api/todo-meta" => routes::todos::handle_meta(req).await,
